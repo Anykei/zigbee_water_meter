@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Andrey Nemenko
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 #ifndef ZIGBEE_MODE_ED
 #error "Select Tools -> Zigbee mode -> End Device"
 #endif

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Andrey Nemenko
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 const exposes = require('zigbee-herdsman-converters/lib/exposes');
 const ea = exposes.access;
 
