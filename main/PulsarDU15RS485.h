@@ -59,6 +59,13 @@ public:
 
         uint8_t res[64];
         size_t rxLen = _serial->readBytes(res, 64);
+
+        if (log_serial) {
+            log_serial->printf("<<< RX [%08X]: ", _address);
+            for(int i=0; i<rxLen; i++) log_serial->printf("%02X ", res[i]);
+            log_serial->println();
+        }
+
         if (rxLen < 10 || calculateCRC(res, rxLen-2) != (res[rxLen-2]|(res[rxLen-1]<<8))) return false;
 
         union { uint8_t b[4]; float f; } data;
