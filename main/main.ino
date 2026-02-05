@@ -10,6 +10,9 @@
 #include "Zigbee.h"
 #include "esp_zigbee_core.h"
 #include "esp_pm.h"
+
+#include "PulsarDU15RS485.h"
+
 #include <Preferences.h>
 
 /* --- Конфигурация --- */
@@ -20,7 +23,10 @@
 #define PULSE_COLD_PIN 10
 #define PULSE_HOT_PIN 11
 #define TX_POWER 20
-#define SIMULATION_MODE 
+// #define SIMULATION_MODE 
+
+#define RS485_RX 21  
+#define RS485_TX 20  
 
 /* --- Глобальные объекты --- */
 Preferences prefs;
@@ -35,9 +41,12 @@ void flashLed(uint8_t r, uint8_t g, uint8_t b, uint16_t ms) {
     setLed(0, 0, 0);
 }
 
+typedef std::function<void(uint32_t)> SerialChangeCallback;
+
 /* --- КЛАСС УСТРОЙСТВА --- */
 class ZigbeeWaterMeter : public ZigbeeEP {
 private:
+    SerialChangeCallback _onSerialChange = nullptr; 
     bool with_battery;
     volatile bool needs_immediate_report;
     uint8_t battery_level;
@@ -54,13 +63,34 @@ public:
         _device_id = ESP_ZB_HA_METER_INTERFACE_DEVICE_ID;
         this->with_battery = with_battery;
     }
-
+    void onSerialChange(SerialChangeCallback cb) {
+        _onSerialChange = cb;
+    }
     // Потокобезопасные методы доступа
-    void set_val(uint64_t v) { portENTER_CRITICAL(&mux); this->value = v; portEXIT_CRITICAL(&mux); }
-    uint64_t get_val() { uint64_t v; portENTER_CRITICAL(&mux); v = this->value; portEXIT_CRITICAL(&mux); return v; }
+    void set_val(uint64_t v) { 
+        if (v == this->value) return;
+        portENTER_CRITICAL(&mux); 
+        this->value = v; 
+        this->needs_immediate_report = true;
+        portEXIT_CRITICAL(&mux); 
+    }
+
+    uint64_t get_val() { 
+        uint64_t v; portENTER_CRITICAL(&mux); 
+        v = this->value; 
+        portEXIT_CRITICAL(&mux); 
+        return v; 
+    }
     
     void set_offset(int32_t v) { this->offset_value = v; }
-    void set_serial(uint32_t v) { this->serial_number = v; }
+    void set_serial(uint32_t v) { 
+        this->serial_number = v; 
+        if (_onSerialChange) {
+            _onSerialChange(v);
+        }
+    }
+
+    uint32_t get_serial() { return this->serial_number; }
     void set_battery(uint8_t v) { this->battery_level = v; }
 
     void increment() {
@@ -154,13 +184,15 @@ public:
     void handleAttributeWrite(const esp_zb_zcl_set_attr_value_message_t *message) {
         if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_METERING) {
             if (message->attribute.id == 0x0200) {
-                this->offset_value = *(int32_t *)message->attribute.data.value;
+                auto value = *(int32_t *)message->attribute.data.value;
+                this->set_offset(value);
                 prefs.putInt(_endpoint == 1 ? "oc" : "oh", offset_value);
                 this->needs_immediate_report = true;
                 Serial.printf("EP %d Offset -> %ld\n", _endpoint, offset_value);
             }
             else if (message->attribute.id == 0x0201) {
-                this->serial_number = *(uint32_t *)message->attribute.data.value;
+                auto serial = *(uint32_t *)message->attribute.data.value;
+                this->set_serial(serial);
                 prefs.putUInt(_endpoint == 1 ? "sc" : "sh", serial_number);
                 this->needs_immediate_report = true;
                 Serial.printf("EP %d Serial -> %lu\n", _endpoint, serial_number);
@@ -171,6 +203,9 @@ public:
 
 ZigbeeWaterMeter coldMeter(1, true); 
 ZigbeeWaterMeter hotMeter(2, false);
+
+PulsarRS485 coldMeterP(&Serial1, 0); //10128939
+PulsarRS485 hotMeterP(&Serial1, 0); //10128442
 
 /* --- Обработчик Dispatcher --- */
 static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message) {
@@ -200,6 +235,21 @@ void IRAM_ATTR isr_hot()  { hotMeter.increment(); }
 
 void setup() {
     Serial.begin(115200);
+    Serial1.begin(9600, SERIAL_8N1, RS485_RX, RS485_TX); 
+
+    coldMeterP.log_serial = &Serial;
+    hotMeterP.log_serial = &Serial;
+
+    coldMeter.onSerialChange([](uint32_t new_sn) {
+        Serial.printf("Event: Cold Serial changed to %lu\n", new_sn);
+        coldMeterP.setSerialNumber(new_sn);
+    });
+
+    hotMeter.onSerialChange([](uint32_t new_sn) {
+        Serial.printf("Event: Hot Serial changed to %lu\n", new_sn);
+        hotMeterP.setSerialNumber(new_sn);
+    });
+
     setLed(30, 0, 0); // Инициализация - Красный
     
     esp_pm_config_t pm_config = { .max_freq_mhz = 160, .min_freq_mhz = 40, .light_sleep_enable = true };
@@ -207,11 +257,14 @@ void setup() {
 
     prefs.begin("water", false);
     coldMeter.set_val(prefs.getULong64("c", 0));
-    hotMeter.set_val(prefs.getULong64("h", 0));
     coldMeter.set_offset(prefs.getInt("oc", 0));
     coldMeter.set_serial(prefs.getUInt("sc", 0));
+    hotMeter.set_val(prefs.getULong64("h", 0));
     hotMeter.set_offset(prefs.getInt("oh", 0));
     hotMeter.set_serial(prefs.getUInt("sh", 0));
+
+    coldMeterP.setSerialNumber(coldMeter.get_serial());
+    hotMeterP.setSerialNumber(hotMeter.get_serial());
 
     pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
     pinMode(PULSE_COLD_PIN, INPUT_PULLUP);
@@ -233,6 +286,9 @@ void setup() {
     
     Serial.println("System Ready");
     flashLed(0, 30, 0, 1000); // Система готова - Зеленый
+
+
+    // Pul
 }
 
 void loop() {
@@ -294,9 +350,26 @@ void loop() {
             if (fake_batt < 10) fake_batt = 100;
             coldMeter.reportBattery();
         }
+
+        float val;
+
+        if (coldMeterP.readTotalValue(val)) {
+            Serial.printf("COLD: %.3f\n", val);
+            coldMeter.set_val((uint64_t)(val * 1000));
+        } else {
+            Serial.println("COLD: Timeout");
+        }
+        delay(300); 
+
+        if (hotMeterP.readTotalValue(val)) {
+            Serial.printf("HOT: %.3f\n", val);
+            hotMeter.set_val((uint64_t)(val * 1000));
+        } else {
+            Serial.println("HOT: Timeout");
+        }
+    
     }
 
-    // 4. Сброс
     if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
         delay(3000);
         if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
