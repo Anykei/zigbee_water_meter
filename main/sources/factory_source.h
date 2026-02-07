@@ -22,8 +22,14 @@ namespace Source {
                     if (drv != nullptr) {
                         // Драйвер уже пришел с настроенным серийником из своей фабрики
                         SmartSource* src = new SmartSource(drv);
+
+                        if (src == nullptr) {
+                            return nullptr; // Защита от неудачного создания
+                        }
+
                         src->setLiters(initialLiters); // Восстанавливаем показания
                         return src;
+                        
                     }
                     return nullptr;
 

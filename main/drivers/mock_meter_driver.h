@@ -20,7 +20,7 @@ namespace Driver {
 
         bool getValue(MeterParam param, float &result) override {
             if (param == MeterParam::TotalVolume) {
-                _mockVol += 0.001; // Имитируем медленный расход
+                _mockVol += rand() % 10 / 1000.0f; // Имитируем медленный расход
                 result = _mockVol;
                 return true;
             }
