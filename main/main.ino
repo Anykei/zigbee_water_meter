@@ -12,8 +12,9 @@
 
 #include "Zigbee.h"
 #include "esp_zigbee_core.h"
-#include "esp_pm.h"
 #include <Preferences.h>
+#include "nvs_flash.h"
+#include "esp_partition.h"
 
 // Abstraction Layers
 #include "utils.h"
@@ -37,7 +38,8 @@
 /* --- ZIGBEE CONFIGURATION --- */
 #define MODEL_ID "C6_WATER_METER"
 #define MANUFACTURER_NAME "MuseLab"
-#define TX_POWER 12
+#define TX_POWER 20
+#define RECCONNECT_TIMEOUT 60000
 
 /* --- APPLICATION CONFIGURATION --- */
 // For testing, use Source::SourceType::Test or Driver::MeterModel::Mock
@@ -75,14 +77,15 @@ Source::WaterSource *hotSrc = nullptr;
 
 /* --- ZIGBEE EVENT HANDLER --- */
 static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message) {
-    if (callback_id == ESP_ZB_CORE_APP_SIGNAL_CB_ID) {
+    if (callback_id == ESP_ZB_CORE_IAS_ACE_ARM_CB_ID) {
         auto *signal = (esp_zb_app_signal_t *)message;
         esp_zb_app_signal_type_t sig_type = (esp_zb_app_signal_type_t)*signal->p_app_signal;
         if (sig_type == ESP_ZB_ZDO_SIGNAL_LEAVE) {
-            Serial.println("Zigbee: Connection lost (Leave).");
+            Serial.println("Zigbee: Connection lost (Leave). Rebooting...");
             Utils::flashLed(50, 0, 0, 500); // Red flash warning
-            // Manual steering removed to avoid loops. Relying on setRebootOnLeave(true).
             if constexpr (NEED_RS485) digitalWrite(RS485_POWER_PIN, LOW);
+            delay(100);
+            esp_restart();
         }
 
         if (sig_type == ESP_ZB_BDB_SIGNAL_STEERING) {
@@ -162,9 +165,38 @@ void saveConfiguration() {
     prefs.putULong64("hl", zigbeeHot.get_val());
 }
 
+// Emergency recovery: Erase all data if button is held at boot
+void checkBootRecovery() {
+    if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
+        Serial.println("\n!!! BOOT BUTTON HELD - RECOVERY MODE !!!");
+        Utils::setLed(50, 0, 0); // Red warning
+        delay(3000); // Wait to confirm intention
+        
+        if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
+            Serial.println("Erasing NVS...");
+            nvs_flash_erase();
+            nvs_flash_init();
+
+            Serial.println("Erasing Zigbee Storage...");
+            const esp_partition_t* zb_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "zb_storage");
+            if (zb_part) {
+                esp_partition_erase_range(zb_part, 0, zb_part->size);
+                Serial.println("Done.");
+            } else {
+                Serial.println("Partition 'zb_storage' not found!");
+            }
+
+            Utils::flashLed(0, 50, 0, 1000); // Green success
+            Serial.println("Restarting...");
+            ESP.restart();
+        }
+    }
+}
+
 // Standard Arduino setup function.
 void setup() {
     initHardware();    // Layer 0: Hardware and Power
+    checkBootRecovery(); // Emergency Reset Check
     loadSystemData();  // Layer 1: Storage (NVS)
     initSources();     // Layer 2: Drivers and Sources
     setupZigbee();     // Layer 3: Network Stack
@@ -176,10 +208,6 @@ void setup() {
 void initHardware() {
     Serial.begin(115200);
     Utils::setLed(30, 0, 0); // Статус: Загрузка
-    
-    // Питание и сон
-    esp_pm_config_t pm_config = { .max_freq_mhz = 160, .min_freq_mhz = 40, .light_sleep_enable = true };
-    esp_pm_configure(&pm_config);
 
     // Шина данных
     if constexpr (NEED_RS485) {
@@ -269,14 +297,17 @@ void setupZigbee() {
     zigbeeCold.setManufacturerAndModel(MANUFACTURER_NAME, MODEL_ID);
     zigbeeHot.setManufacturerAndModel(MANUFACTURER_NAME, MODEL_ID);
 
+    // Configure sleep before starting the stack
+    esp_zb_sleep_enable(true);
+
     // Start the stack
-    Zigbee.setRebootOnLeave(true);
     if(!Zigbee.begin(ZIGBEE_END_DEVICE)) {
         Serial.println("Zigbee: CRITICAL ERROR STARTING STACK");
+        Serial.println("Data corruption detected or Partition Scheme mismatch.");
+        Serial.println("Hold BOOT button during startup to Factory Reset.");
+        // delay(5000);
+        // ESP.restart();
     }
-
-    // Final stack configuration
-    esp_zb_sleep_enable(true);
     esp_zb_core_action_handler_register(zb_action_handler);
     esp_zb_set_tx_power(TX_POWER);
 }

@@ -44,7 +44,10 @@ namespace Source {
         void setOffset(int32_t liters) { _offset = liters; }
         int32_t getOffset() const { return _offset; }
 
-        virtual void setSerialNumber(uint32_t sn) { _serialNumber = sn; }
+        virtual void setSerialNumber(uint32_t sn) { 
+            _serialNumber = sn; 
+            _lastPoll = 0; // Force immediate update with new SN
+        }
         uint32_t getSerialNumber() const { return _serialNumber; }
 
         virtual float getBatteryVoltage() const { return _batteryVoltage; }

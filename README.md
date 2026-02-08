@@ -45,7 +45,7 @@ A professional, dual-channel Zigbee water meter firmware for ESP32-C6. Designed 
 2.  **Settings:**
     *   **Board:** ESP32-C6 (e.g., `esp32-c6-devkitc-1`).
     *   **Zigbee Mode:** End Device.
-    *   **Partition Scheme:** Minimal SPIFFS (Large APP).
+    *   **Partition Scheme:** Zigbee 8MB with SPIFFS.
 3.  **Configuration:**
     Open `main/main.ino` and adjust the configuration section:
     ```cpp
