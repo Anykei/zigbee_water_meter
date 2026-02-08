@@ -1,65 +1,96 @@
-# Zigbee Water Meter (MuseLab C6_WATER_V2) ⚙️💧
+# ESP32-C6 Zigbee Water Meter
 
-**Licensed under GPLv3 — see `LICENSE`.**
+A professional, dual-channel Zigbee water meter firmware for ESP32-C6. Designed to interface with both smart RS485 meters (Modbus) and traditional pulse-output meters.
 
-**Кратко:** прошивка ESP-устройства и определение для Zigbee (конвертер) для двухканального счётчика воды (холодная/горячая). Поддерживает итоговые показания (m³), оффсеты, серийники и отчёт батареи.
+## Features
 
-![Отображение в Zigbee2MQTT](assets/z2m_view.png)
-*Отображение в Zigbee2MQTT (пример).* 
+*   **Dual Channel Support:** Monitor Cold and Hot water usage simultaneously.
+*   **Hybrid Input Modes:**
+    *   **Smart Mode:** Reads digital data (Total Volume, Serial Number) via RS485 (currently supports [Pulsar Du 15/20](https://pulsarm.ru/products/schetchik-vody/kvartirnyy-schyetchik-vody-du-15-du-20/elektronnyy-schetchik-du15-rs-485-qn-1-5-m3-ch-l-110mm/)).
+    *   **Pulse Mode:** Counts physical pulses from reed switches or open-collector outputs.
+*   **Zigbee 3.0 End Device:**
+    *   Low power consumption (Sleepy End Device).
+    *   Reports Total Volume (m³) and Hourly Consumption.
+    *   Configurable via Zigbee (Offset, Serial Number).
+    *   Battery status reporting.
+*   **Data Safety:**
+    *   Auto-saves readings to NVS (Non-Volatile Storage) to survive power loss.
+    *   Wear-leveling protection (saves every 15 mins or on config change).
+*   **Enterprise Architecture:**
+    *   Modular C++ design using Factory Pattern.
+    *   Non-blocking event loop.
+    *   Robust error handling and reconnection logic.
 
----
+## Hardware
 
-## Содержание репозитория 📁
-- `main/main.ino` — исходник прошивки для ESP (Zigbee End Device). 🔧
-  Основные настройки в начале файла: `MODEL_ID`, `MANUFACTURER_NAME`, пины (`RGB_LED_PIN`, `PULSE_COLD_PIN`, `PULSE_HOT_PIN`), `TX_POWER`, `SIMULATION_MODE`.
-- `water_meter_converter.js` — определение устройства для `zigbee-herdsman-converters` (используется в Zigbee2MQTT / Home Assistant). 🔌
-- `assets/z2m_view.png` — скриншот отображения в Zigbee2MQTT. 📸
-- `LICENSE` — GPLv3.
+*   **Microcontroller:** ESP32-C6 (e.g., SuperMini C6).
+*   **Communication:** RS485 Transceiver (MAX485/MAX3485) for Smart mode.
+*   **Sensors:** Pulse meters or RS485 Modbus meters.
 
----
+### Pinout Configuration
 
-## Что делает проект 🎯
-- Эмулирует двухканальный счётчик воды (Endpoint 1 — холодная вода, Endpoint 2 — горячая).
-- Отправляет суммарные показания в литрах/куб.метрах (`water_total_1`, `water_total_2` — единицы в m³).
-- Позволяет задавать оффсет (`offset_1`, `offset_2`) в м³ (конвертер переводит куб. метры в литры для прошивки).
-- Поддержка записи/чтения серийника (`serial_1`, `serial_2`) и отчёт батареи (через endpoint 1).
+| Peripheral | GPIO Pin | Note |
+| :--- | :--- | :--- |
+| **RGB LED** | 8 | WS2812 / Neopixel |
+| **Button** | 9 | Boot/Config Button |
+| **RS485 RX** | 21 | |
+| **RS485 TX** | 20 | |
+| **RS485 EN** | 19 | DE/RE Pin |
+| **Pulse Cold** | 10 | Interrupt Input |
+| **Pulse Hot** | 11 | Interrupt Input |
 
----
+## Installation
 
-## Быстрое руководство по интеграции 🔗
+1.  **Environment:** PlatformIO or Arduino IDE with ESP32 Arduino Core (v3.0+).
+2.  **Settings:**
+    *   **Board:** ESP32-C6 (e.g., `esp32-c6-devkitc-1`).
+    *   **Zigbee Mode:** End Device.
+    *   **Partition Scheme:** Minimal SPIFFS (Large APP).
+3.  **Configuration:**
+    Open `main/main.ino` and adjust the configuration section:
+    ```cpp
+    constexpr Source::SourceType COLD_TYPE = Source::SourceType::Smart; // or Pulse
+    constexpr Source::SourceType HOT_TYPE = Source::SourceType::Smart;
+    ```
+4.  **Flash:** Upload the firmware to your board.
 
-### Прошивка (`main/main.ino`)
-1. Соберите и прошейте проект на ESP32 с поддержкой Zigbee (используйте ESP-IDF/PlatformIO с компонентами Zigbee).  
-2. Отредактируйте в `main/main.ino` параметры (пины, `MODEL_ID`, `TX_POWER` и т.д.) при необходимости.  
-3. После прошивки устройство должно работать как Zigbee End Device с двумя endpoint'ами.
+## Zigbee Integration
 
-> Примечание: код использует ESP Zigbee stack и специфичные API; выбирайте совместимый инструмент сборки (ESP-IDF/PlatformIO с правильными компонентами).
+### Pairing
+1.  Hold the **BOOT button (GPIO 9)** for **3 seconds** until the LED flashes Red.
+2.  The device will reset and enter pairing mode.
+3.  The LED will flash Green/Yellow during connection attempts.
+4.  Once connected, the LED will turn off (sleeping).
 
-### Добавление конвертера в Zigbee2MQTT / Home Assistant
-1. Скопируйте `water_meter_converter.js` в каталог пользовательских устройств `zigbee-herdsman-converters/devices` (или следуйте инструкции вашего набора конвертеров).
-2. Перезапустите Zigbee2MQTT/HA, чтобы устройство распозналось как `C6_WATER_V2` (vendor: MuseLab).
-3. Управление оффсетом: отправляйте значения `offset_1` / `offset_2` в м³ (например `1.500`), конвертер переведёт в литры перед записью в устройство.
+### Zigbee2MQTT
+A custom converter is required to expose all features (Offsets, Serial Numbers, Hourly stats).
+Copy `water_meter_converter.js` to your Zigbee2MQTT configuration folder and add it to `configuration.yaml`:
 
----
+```yaml
+external_converters:
+  - water_meter_converter.js
+```
 
-## Примеры свойств (как появляются в Zigbee2MQTT) 🔍
-- `water_total_1` / `water_total_2` — итог, состояние (единица: **m³**)  
-- `offset_1` / `offset_2` — оффсет (изменяемое, **m³**)  
-- `serial_1` / `serial_2` — серийный номер устройства  
-- `battery` — процент батареи (отчёт с endpoint 1)
+### Attributes
 
----
+| Cluster | Attribute ID | Name | Type | Access | Description |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Metering** | 0x0000 | CurrentSummDelivered | u48 | R | Total Volume (m³) |
+| **Metering** | 0x0400 | InstantaneousDemand | u32 | R | Last Hour Consumption (Liters) |
+| **Metering** | 0x0100 | CurrentTier1SummDelivered | u48 | RW | Calibration Offset (Liters) |
+| **Metering** | 0x0102 | CurrentTier2SummDelivered | u48 | RW | Meter Serial Number |
 
-## Вклад и развитие ✨
-- Пожелания и исправления — открывайте issue или PR.  
+## Usage
 
----
+### LED Status
+*   **Cyan Flash:** Received command from Zigbee Coordinator.
+*   **Green Flash:** Data transmitted successfully.
+*   **Red Flash:** Connection lost or Reset triggered.
+*   **Yellow Blink:** Searching for network.
 
-## Лицензия 📝
-Проект распространяется под **GPLv3**. См. файл `LICENSE` для деталей.
+### Button
+*   **Long Press (>3s):** Factory Reset and Re-pairing.
 
----
+## License
 
-Если нужно, могу также:
-- Добавить пример конфигурации для Zigbee2MQTT;  
-- Дополнить инструкции по сборке (PlatformIO/ESP-IDF) с конкретными командами. 💡
+Copyright 2026 Andrey Nemenko.

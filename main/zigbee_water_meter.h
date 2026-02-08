@@ -9,6 +9,11 @@
 
 typedef std::function<void()> SettingsChangedCallback;
 
+// Represents a Zigbee endpoint for a water meter.
+//
+// This class handles the interaction between the Zigbee stack (Clusters, Attributes)
+// and the underlying WaterSource logic. It manages reporting values, handling
+// configuration writes from the coordinator, and battery status.
 class ZigbeeWaterMeter : public ZigbeeEP {
 public:
     ZigbeeWaterMeter(uint8_t endpoint, bool with_battery = false) : 
@@ -20,7 +25,7 @@ public:
 
     void setSource(Source::WaterSource* s) { _source = s; }
 
-    // Методы-прокси (теперь работают напрямую с Source)
+    // Proxy methods interacting directly with the Source.
     void set_val(uint64_t v) { if (_source) _source->setLiters(v); }
     uint64_t get_val() { return _source ? _source->getLiters() : 0; }
     bool battery_supported() const { return _with_battery; }
@@ -37,9 +42,10 @@ public:
         return _source ? _source->getOffset() : 0; 
     }
 
+    // Checks if a report is required based on value changes or immediate flags.
     bool shouldReport() {
         if (!_source) return false;
-        // Если пришла команда на запись SN/Offset или данные в источнике изменились
+        // If a write command for SN/Offset was received or data in source changed
         return needs_immediate_report || (_source->getTotalLiters() != _lastReportedValue);
     }
 
@@ -64,18 +70,18 @@ public:
         uint8_t uom = 0x07; uint8_t fmt = 0x4B; uint8_t type = 0x02;
         int32_t def_off = 0; uint32_t def_sn = 0;
 
-        // Основное значение (0x0000)
+        // Main Value (0x0000)
         esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0000, 0x25, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, def_u48);
         
-        // Кастомный атрибут: Часовой расход (0x0400) - литры
+        // Custom Attribute: Hourly Consumption (0x0400) - liters
         uint32_t def_hourly = 0;
         esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0400, 0x23, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &def_hourly);
 
-        // Настройки (0x0100, 0x0102)
+        // Settings (0x0100, 0x0102)
         esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0100, 0x25 /* u48 */, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, def_u48);
         esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0102, 0x25 /* u48 */, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, def_u48);
 
-        // Метаданные (multiplier, divisor и т.д.)
+        // Metadata (multiplier, divisor, etc.)
         esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0300, 0x30, 0x01, &uom);
         esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0303, 0x18, 0x01, &fmt);
         esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0306, 0x30, 0x01, &type);
@@ -87,6 +93,7 @@ public:
         _ep_config = { .endpoint = _endpoint, .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID, .app_device_id = _device_id, .app_device_version = 0 };
     }
 
+    // Reports the current total volume to the Zigbee coordinator.
     void reportValue() {
         if (!_source) return;
         uint64_t total = _source->getTotalLiters();
@@ -101,6 +108,7 @@ public:
         _lastReportedValue = _source->getTotalLiters();
     }
 
+    // Reports the consumption for the last completed hour.
     void reportHourly() {
         if (!_source) return;
         uint32_t hourly = (uint32_t)_source->getLastHourConsumption();
@@ -113,6 +121,7 @@ public:
         Serial.printf("EP %d: Reported LAST HOUR consumption: %u\n", _endpoint, hourly);
     }
 
+    // Reports the battery percentage.
     void reportBattery() {
         if (!_with_battery) return;
         uint8_t zb_val = _battery_level * 2;
@@ -147,10 +156,11 @@ public:
         // sendReportCmd(ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG, 0x0021);
     }
 
+    // Reports configuration attributes (Offset and Serial Number).
     void reportConfig() {
         if (!_source) return;
         
-        // Упаковываем 32-битные числа в 48-битные буферы (6 байт)
+        // Pack 32-bit numbers into 48-bit buffers (6 bytes)
         auto packU48 = [](uint32_t val, uint8_t* buf) {
             memset(buf, 0, 6);
             memcpy(buf, &val, 4);
@@ -169,14 +179,24 @@ public:
         esp_zb_lock_release();
     }
 
+    // Handles incoming write requests for attributes.
     void handleAttributeWrite(const esp_zb_zcl_set_attr_value_message_t *message) {
         if (!_source) return;
         if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_METERING) {
+            // Helper to safely unpack a 32-bit value from a 48-bit (6-byte) buffer
+            auto unpackU32 = [](const esp_zb_zcl_attribute_t* attr) -> uint32_t {
+                if (attr->data.type == ESP_ZB_ZCL_ATTR_TYPE_U48 && attr->data.size >= 4) {
+                    uint32_t val = 0;
+                    memcpy(&val, attr->data.value, sizeof(val));
+                    return val;
+                }
+                return 0; // Or handle error
+            };
+
             uint16_t id = message->attribute.id;
-            uint32_t val = *(uint32_t*)message->attribute.data.value;
+            uint32_t val = unpackU32(&message->attribute);
             bool changed = false;
 
-            // Исправлено: ловим НОВЫЕ ID 0x4000 и 0x4001
             if (id == 0x100) { 
                 _source->setOffset((int32_t)val);
                 changed = true;
@@ -214,7 +234,7 @@ private:
     uint16_t _multiplier = 1;
     uint16_t _divisor = 1000;
 
-    uint64_t _lastReportedValue = 0xFFFFFFFFFFFFFFFF; // Инициализируем в "неизвестное" значение, чтобы гарантировать первый репорт
+    uint64_t _lastReportedValue = 0xFFFFFFFFFFFFFFFF; // Initialize to "unknown" to ensure first report
     bool needs_immediate_report = false;
 };
 

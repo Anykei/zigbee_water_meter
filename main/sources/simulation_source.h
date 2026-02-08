@@ -5,11 +5,12 @@
 
 namespace Source {
 
+// Simulates water flow for testing purposes.
 class SimulationSource : public WaterSource {
 private:
     uint64_t _liters = 0;
     uint32_t _lastUpdate = 0;
-    float _flowRate = 0.1; // Литров в секунду (имитация расхода)
+    float _flowRate = 0.1; // Liters per second (flow simulation)
 
 public:
     SimulationSource(uint64_t startValue = 0) : _liters(startValue) {}
@@ -23,9 +24,9 @@ public:
 
     void update() override {
         uint32_t now = millis();
-        // Каждую секунду добавляем "расход"
+        // Add "consumption" every second
         if (now - _lastUpdate > 1000) {
-            _liters += rand() % 10 + 1; // Добавляем 1 литр в секунду для наглядности
+            _liters += rand() % 10 + 1; // Add random liters for visibility
             _lastUpdate = now;
         }
     }
