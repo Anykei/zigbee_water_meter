@@ -10,7 +10,7 @@ A professional, dual-channel Zigbee water meter firmware for ESP32-C6. Designed 
 
 ### Zigbee2MQTT Integration
 
-![Zigbee2MQTT Interface](assets/zigbee2mqtt_screenshot.png)
+![Zigbee2MQTT Interface](assets/z2m_view_v2.png)
 
 *Live view showing dual-channel water metering with hourly consumption tracking, configurable offsets, and serial number management.*
 
