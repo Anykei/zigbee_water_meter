@@ -4,6 +4,9 @@
  * Main application entry point for the ESP32-C6 Zigbee Water Meter.
  * This file handles hardware initialization, Zigbee stack configuration,
  * and the main event loop using a non-blocking architecture.
+ * 
+ * Version: 1.0.0
+ * Release Date: 2026-02-09
  */
 
 #ifndef ZIGBEE_MODE_ED
@@ -23,6 +26,10 @@
 #include "hwi_streams/rs485_stream.h"
 #include "drivers/driver_factory.h"
 #include "sources/factory_source.h"
+
+/* --- VERSION --- */
+#define FIRMWARE_VERSION "1.0.0"
+#define BUILD_DATE "2026-02-09"
 
 /* --- HARDWARE CONFIGURATION --- */
 #define RGB_LED_PIN      8
@@ -226,6 +233,13 @@ void setup() {
     Serial.begin(115200);
     delay(100); // Allow time for serial to initialize before printing boot messages
     
+    // Print firmware version
+    Serial.println("\n╔════════════════════════════════════════════════════════╗");
+    Serial.printf("║  ESP32-C6 Zigbee Water Meter v%s              ║\n", FIRMWARE_VERSION);
+    Serial.printf("║  Build: %s                              ║\n", BUILD_DATE);
+    Serial.println("║  Copyright 2026 Andrey Nemenko                       ║");
+    Serial.println("╚════════════════════════════════════════════════════════╝\n");
+    
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     switch(wakeup_reason) {
         case ESP_SLEEP_WAKEUP_TIMER:
@@ -337,9 +351,6 @@ void setupZigbee() {
     zigbeeCold.setSource(coldSrc.get());
     zigbeeHot.setSource(hotSrc.get());
 
-    // Колбэк onSettingsChanged удален, чтобы избежать блокирующих записей NVS
-    // из задачи Zigbee. Сохранение теперь обрабатывается в основном цикле.
-
     // Register endpoints in the stack
     zigbeeCold.begin(); 
     zigbeeHot.begin();
@@ -352,7 +363,6 @@ void setupZigbee() {
 
     // Configure sleep before starting the stack
     // Set threshold: device will enter deep sleep if idle time > 60 seconds
-    // This allows deep sleep between 5-minute polling intervals
     esp_zb_sleep_set_threshold(DEEP_SLEEP_THRESHOLD);  
     esp_zb_sleep_enable(true);
     
