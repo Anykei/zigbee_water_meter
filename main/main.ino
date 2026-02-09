@@ -59,6 +59,8 @@ constexpr uint32_t HEARTBEAT_INTERVAL = 60000 * 30; // Heartbeat interval for HA
 constexpr uint32_t BATTERY_REPORT_INTERVAL = 60000 * 30; // Interval for reporting battery status (ms)
 constexpr uint32_t COLD_POOL_INTERVAL = 60000 * 5; // Polling interval for cold channel (ms)
 constexpr uint32_t HOT_POOL_INTERVAL  = 60000 * 5; // Polling interval for hot channel (ms)
+constexpr uint32_t DEEP_SLEEP_THRESHOLD = 60; // Time in seconds before entering deep sleep when idle
+constexpr uint32_t LOOP_IDLE_DELAY = 5000; // Main loop idle delay (ms)
 
 constexpr Source::SourceType COLD_TYPE = Source::SourceType::Smart;
 constexpr Source::SourceType HOT_TYPE = Source::SourceType::Smart;
@@ -101,22 +103,15 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         return ESP_OK;
     }
 
-    // Handle sleep signal
+    // Handle sleep signal (End Device only)
+    // NOTE: For ED, sleep is managed automatically by the stack.
+    // This callback is informational and should NOT call esp_zb_sleep_now().
     if (callback_id == ESP_ZB_COMMON_SIGNAL_CAN_SLEEP) {
-        Serial.println("Zigbee: Entering sleep mode...");
-        Serial.flush();
-        
-        if constexpr (NEED_RS485) {
-            Serial1.end(); 
-            digitalWrite(RS485_POWER_PIN, LOW);
-        }
-        
-        esp_zb_sleep_now();
-        
-        if constexpr (NEED_RS485) {
-            digitalWrite(RS485_POWER_PIN, HIGH);
-            Serial1.begin(RS485_BAUD, RS485_CONFIG, RS485_RX, RS485_TX);
-        }
+        // Stack will automatically enter light sleep between polls.
+        // We don't disable RS485 power here because:
+        // 1. Light sleep keeps peripherals powered
+        // 2. We need RS485 ready when device wakes for polling
+        // 3. Manual power control here causes race conditions
         return ESP_OK;
     }
 
@@ -228,6 +223,24 @@ void checkBootRecovery() {
 
 // Standard Arduino setup function.
 void setup() {
+    Serial.begin(115200);
+    delay(100); // Allow time for serial to initialize before printing boot messages
+    
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    switch(wakeup_reason) {
+        case ESP_SLEEP_WAKEUP_TIMER:
+            Serial.println("*** WOKE FROM DEEP SLEEP (Timer) ***");
+            break;
+        case ESP_SLEEP_WAKEUP_EXT0:
+        case ESP_SLEEP_WAKEUP_EXT1:
+            Serial.println("*** WOKE FROM DEEP SLEEP (External) ***");
+            break;
+        case ESP_SLEEP_WAKEUP_UNDEFINED:
+        default:
+            Serial.println("*** POWER-ON or RESET (not from deep sleep) ***");
+            break;
+    }
+    
     initHardware();    // Layer 0: Hardware and Power
     checkBootRecovery(); // Emergency Reset Check
     loadSystemData();  // Layer 1: Storage (NVS)
@@ -338,7 +351,12 @@ void setupZigbee() {
     zigbeeHot.setManufacturerAndModel(MANUFACTURER_NAME, MODEL_ID);
 
     // Configure sleep before starting the stack
+    // Set threshold: device will enter deep sleep if idle time > 60 seconds
+    // This allows deep sleep between 5-minute polling intervals
+    esp_zb_sleep_set_threshold(DEEP_SLEEP_THRESHOLD);  
     esp_zb_sleep_enable(true);
+    
+    Serial.printf("Zigbee: Sleep enabled with %us threshold for deep sleep optimization\n", DEEP_SLEEP_THRESHOLD);
 
     // Start the stack
     if(!Zigbee.begin(ZIGBEE_END_DEVICE)) {
@@ -348,37 +366,6 @@ void setupZigbee() {
     }
     esp_zb_core_action_handler_register(zb_action_handler);
     esp_zb_set_tx_power(TX_POWER);
-}
-
-void loop() {
-    // 1. Poll Hardware (RS-485 / Pulse)
-    static bool connected_logged = false;
-    updateSources();
-
-    // 2. Network Logic (only if connected)
-    if (Zigbee.connected()) {
-        if (!connected_logged) {
-            Serial.println("Application: Zigbee.connected() is true. Main logic is now active.");
-            connected_logged = true;
-        }
-        handleZigbeeReporting();
-        handleAutoSave();
-        handleConfigSave();
-    }
-
-    // 3. UI and Service
-    updateStatusIndication();
-    checkServiceButton();
-    // Serial.println("Main loop heartbeat"); // Debug heartbeat to confirm loop is running
-    delay(10); // Даем время IDLE задаче и стеку Zigbee
-}
-
-/* --- BLOCK IMPLEMENTATIONS --- */
-
-// 1. Update Data Sources
-void updateSources() {
-    if (coldSrc) coldSrc->tick();
-    if (hotSrc)  hotSrc->tick();
 }
 
 // 2. Smart Zigbee Reporting
@@ -391,6 +378,59 @@ enum ReportState {
 };
 static ReportState reportState = IDLE;
 static uint32_t nextActionTime = 0;
+
+void loop() {
+    static bool connected_logged = false;
+    static uint32_t last_loop_log = 0;
+    static uint32_t last_sleep_cycle_start = 0;  // Track sleep cycle start
+    uint32_t now = millis();
+    
+    updateSources();
+
+    if (Zigbee.connected()) {
+        if (!connected_logged) {
+            Serial.println("Application: Zigbee.connected() is true. Main logic is now active.");
+            connected_logged = true;
+            last_sleep_cycle_start = now;
+        }
+        handleZigbeeReporting();
+        handleAutoSave();
+        handleConfigSave();
+    } else {
+        connected_logged = false;
+    }
+
+    updateStatusIndication();
+    checkServiceButton();
+    
+    // Diagnostic logging with proper sleep cycle tracking
+    if (now - last_loop_log >= 120000) {
+        last_loop_log = now;
+        uint32_t sleep_cycle_duration = now - last_sleep_cycle_start;
+        // Reset cycle start for next measurement
+        uint32_t prev_cycle_start = last_sleep_cycle_start;
+        last_sleep_cycle_start = now;
+        
+        Serial.printf("System: Loop alive. Connected=%s, Uptime=%lu min, SleepCycleDuration=%lu ms\n", 
+                      Zigbee.connected() ? "YES" : "NO", now / 60000, sleep_cycle_duration);
+    }
+    
+    // Always delay to allow sleep, but more aggressively when idle
+    if (reportState == IDLE && Zigbee.connected()) {
+        delay(LOOP_IDLE_DELAY);  // 5000ms - deep sleep can trigger here
+    } else {
+        delay(100);  // Minimal delay during active reporting
+    }
+}
+
+/* --- BLOCK IMPLEMENTATIONS --- */
+
+// 1. Update Data Sources
+void updateSources() {
+    if (coldSrc) coldSrc->tick();
+    if (hotSrc)  hotSrc->tick();
+}
+
 
 void handleZigbeeReporting() {
     static uint32_t boot_time = millis();
