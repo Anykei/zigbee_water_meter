@@ -6,39 +6,40 @@
 
 namespace Driver {
 enum class MeterParam {
-    TotalVolume,           // Накопленный объем (литры/кубы)
-    BatteryVoltage,        // Текущее напряжение (Вольты)
+    TotalVolume,           // Accumulated volume (liters/m3)
+    BatteryVoltage,        // Current voltage (Volts)
     
-    BatteryThresholdMin,   // Порог глубокого разряда (отключение)
-    BatteryThresholdAlarm, // Порог предупреждения (сообщение в систему)
-    BatteryThresholdMax,   // Порог максимально допустимого напряжения
+    BatteryThresholdMin,   // Deep discharge threshold (shutdown)
+    BatteryThresholdAlarm, // Warning threshold (system alert)
+    BatteryThresholdMax,   // Maximum allowable voltage threshold
     
-    FlowRateMin,           // Минимальный детектируемый расход
-    FlowRateMax            // Максимальный допустимый расход
+    FlowRateMin,           // Minimum detectable flow rate
+    FlowRateMax            // Maximum allowable flow rate
 };
 
+// Interface for physical meter drivers (Modbus/RS485).
 class SmartMeterDriver {
 public:
     virtual ~SmartMeterDriver() {}
 
     void setTransport(Stream* transport) { _transport = transport; }
 
-    // Установка порта для вывода TX/RX пакетов (любой Serial)
+    // Sets the port for TX/RX packet logging (any Serial).
     void setLogger(Print* logger) { log_serial = logger; }
 
-    // Установка адреса устройства на шине
+    // Sets the device address on the bus.
     virtual void setAddress(uint32_t address) {
          _address = address;
     }
 
-    // Возвращает список параметров, которые этот конкретный драйвер умеет читать
+    // Returns a list of parameters that this specific driver can read.
     virtual std::vector<MeterParam> getSupportedParams() const = 0;
 
-    // Главный метод получения данных
+    // Main method for retrieving data.
     virtual bool getValue(MeterParam param, float &result) = 0;
 
 protected:
-    Stream* _transport = nullptr; // Абстрактный транспорт (может быть RS485, Modbus, и т.д.)
+    Stream* _transport = nullptr; // Abstract transport (can be RS485, Modbus, etc.)
     Print* log_serial = nullptr;
     uint32_t _address = 0;
     

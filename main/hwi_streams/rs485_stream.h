@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 
+// Wrapper around HardwareSerial to handle RS485 Direction Enable (DE) pin.
+// Automatically toggles the DE pin when writing data.
 class RS485Stream : public Stream {
 private:
     HardwareSerial* _serial;
