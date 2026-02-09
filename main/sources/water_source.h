@@ -33,11 +33,18 @@ namespace Source {
         bool _hourChanged = false;
         bool _dayChanged = false;
 
-        const uint32_t MS_IN_HOUR = 3600000;
-        const uint32_t MS_IN_DAY  = 86400000;
+        uint32_t _msInHour = 3600000; // 1 hour
+        uint32_t _msInDay  = 86400000; // 24 hours
 
     public:
         virtual ~WaterSource() {}
+
+        // Sets short intervals for testing purposes.
+        void setTestMode(bool enabled) {
+            _msInHour = enabled ? 10000 : 3600000; // 10 seconds if test mode is on
+            _msInDay  = enabled ? 20000 : 86400000; // 20 seconds if test mode is on
+            Serial.printf("Source: Test mode is %s. Hour interval: %lu ms\n", enabled ? "ON" : "OFF", _msInHour);
+        }
 
         void setPollInterval(uint32_t ms) { _pollInterval = ms; }
         
@@ -80,7 +87,7 @@ namespace Source {
             }
             
             // 1. Hour closing logic
-            if (now - _lastHourCheck >= MS_IN_HOUR) {
+            if (now - _lastHourCheck >= _msInHour) {
                 uint64_t current = getLiters();
                 _lastCompletedHourLiters = (current >= _litersAtHourStart) ? (current - _litersAtHourStart) : 0;
                 
@@ -92,7 +99,7 @@ namespace Source {
             }
 
             // 2. Day closing logic
-            if (now - _lastDayCheck >= MS_IN_DAY) {
+            if (now - _lastDayCheck >= _msInDay) {
                 uint64_t current = getLiters();
                 _lastCompletedDayLiters = (current >= _litersAtDayStart) ? (current - _litersAtDayStart) : 0;
                 
@@ -106,6 +113,7 @@ namespace Source {
             // 3. Standard hardware polling (driver)
             if (now - _lastPoll >= _pollInterval) {
                 _lastPoll = now;
+                Serial.println("Source: Polling for new data...");
                 update();
             }
         }

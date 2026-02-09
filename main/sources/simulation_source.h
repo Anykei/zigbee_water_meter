@@ -2,6 +2,7 @@
 #define SIMULATION_SOURCE_H
 
 #include "water_source.h"
+#include <Arduino.h>
 
 namespace Source {
 
@@ -26,6 +27,7 @@ public:
         uint32_t now = millis();
         // Add "consumption" every second
         if (now - _lastUpdate > 1000) {
+            // Serial.printf("SimulationSource: Adding %.2f liters. Total before: %llu L\n", _flowRate, _liters);
             _liters += rand() % 10 + 1; // Add random liters for visibility
             _lastUpdate = now;
         }

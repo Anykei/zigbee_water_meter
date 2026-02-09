@@ -14,6 +14,16 @@ typedef std::function<void()> SettingsChangedCallback;
 // This class handles the interaction between the Zigbee stack (Clusters, Attributes)
 // and the underlying WaterSource logic. It manages reporting values, handling
 // configuration writes from the coordinator, and battery status.
+
+
+// Using Tier attributes for custom settings is a common workaround.
+// kAttrIdOffset: Stores the calibration offset in liters.
+// kAttrIdSerialNumber: Stores the meter's serial number.
+static constexpr uint16_t kAttrIdOffset = 0x0100;
+static constexpr uint16_t kAttrIdSerialNumber = 0x0102;
+// Custom attribute for hourly consumption, outside of ZCL standard range.
+static constexpr uint16_t kAttrHourlyConsumption = 0x0400;
+
 class ZigbeeWaterMeter : public ZigbeeEP {
 public:
     ZigbeeWaterMeter(uint8_t endpoint, bool with_battery = false) : 
@@ -21,7 +31,9 @@ public:
         _device_id = ESP_ZB_HA_METER_INTERFACE_DEVICE_ID;
     }
 
-    void onSettingsChanged(SettingsChangedCallback cb) { _onSettingsChanged = cb; }
+    // Flag indicating that configuration (SN, Offset) was changed via Zigbee.
+    bool isConfigDirty() const { return _config_dirty; }
+    void clearConfigDirty() { _config_dirty = false; }
 
     void setSource(Source::WaterSource* s) { _source = s; }
 
@@ -46,7 +58,7 @@ public:
     bool shouldReport() {
         if (!_source) return false;
         // If a write command for SN/Offset was received or data in source changed
-        return needs_immediate_report || (_source->getTotalLiters() != _lastReportedValue);
+        return _needs_immediate_report || (_source->getTotalLiters() != _lastReportedValue);
     }
 
     void begin() {
@@ -71,23 +83,22 @@ public:
         int32_t def_off = 0; uint32_t def_sn = 0;
 
         // Main Value (0x0000)
-        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0000, 0x25, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, def_u48);
+        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0000, ESP_ZB_ZCL_ATTR_TYPE_U48, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, def_u48);
         
         // Custom Attribute: Hourly Consumption (0x0400) - liters
         uint32_t def_hourly = 0;
-        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0400, 0x23, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &def_hourly);
-
+        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0400, ESP_ZB_ZCL_ATTR_TYPE_U32, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &def_hourly);
         // Settings (0x0100, 0x0102)
-        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0100, 0x25 /* u48 */, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, def_u48);
-        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0102, 0x25 /* u48 */, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, def_u48);
+        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0100, ESP_ZB_ZCL_ATTR_TYPE_U48, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, def_u48);
+        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0102, ESP_ZB_ZCL_ATTR_TYPE_U48, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, def_u48);
 
         // Metadata (multiplier, divisor, etc.)
-        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0300, 0x30, 0x01, &uom);
-        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0303, 0x18, 0x01, &fmt);
-        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0306, 0x30, 0x01, &type);
+        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0300, ESP_ZB_ZCL_ATTR_TYPE_U8, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &uom);
+        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0303, ESP_ZB_ZCL_ATTR_TYPE_8BITMAP, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &fmt);
+        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0306, ESP_ZB_ZCL_ATTR_TYPE_U8, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &type);
 
-        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0301, 0x21 /* u16 */, 0x01, &_multiplier);  // 0x21 вместо 0x22
-        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0302, 0x21 /* u16 */, 0x01, &_divisor);
+        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0301, ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &_multiplier);  // 0x21 вместо 0x22
+        esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0302, ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &_divisor);
 
         esp_zb_cluster_list_add_metering_cluster(_cluster_list, m_attr, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
         _ep_config = { .endpoint = _endpoint, .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID, .app_device_id = _device_id, .app_device_version = 0 };
@@ -96,6 +107,7 @@ public:
     // Reports the current total volume to the Zigbee coordinator.
     void reportValue() {
         if (!_source) return;
+        // Serial.printf("EP %d: Checking if report needed... ", _endpoint);
         uint64_t total = _source->getTotalLiters();
         uint8_t zb_u48[6];
         for (int i = 0; i < 6; i++) zb_u48[i] = (total >> (i * 8)) & 0xFF;
@@ -106,6 +118,7 @@ public:
         esp_zb_lock_release();
 
         _lastReportedValue = _source->getTotalLiters();
+        _needs_immediate_report = false;
     }
 
     // Reports the consumption for the last completed hour.
@@ -132,28 +145,13 @@ public:
             _endpoint, 
             ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG, 
             ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, 
-            0x0021, 
+            0x0021, /* BatteryPercentageRemaining */
             &zb_val, 
             false
         );
         
-        esp_zb_zcl_report_attr_cmd_t report_cmd;
-        memset(&report_cmd, 0, sizeof(report_cmd));
-        report_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
-        report_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG;
-        report_cmd.attributeID = 0x0021; // И здесь тоже 0x0021
-        report_cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
-        report_cmd.zcl_basic_cmd.src_endpoint = _endpoint;
-        report_cmd.zcl_basic_cmd.dst_endpoint = 1; 
-        report_cmd.zcl_basic_cmd.dst_addr_u.addr_short = 0x0000;
-        
-        esp_zb_zcl_report_attr_cmd_req(&report_cmd);
+        sendReportCmd(0x0021, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG);
         esp_zb_lock_release();
-
-        // esp_zb_lock_acquire(portMAX_DELAY);
-        // esp_zb_zcl_set_attribute_val(_endpoint, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, 0x0021, &zb_val, false);
-        // esp_zb_lock_release();
-        // sendReportCmd(ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG, 0x0021);
     }
 
     // Reports configuration attributes (Offset and Serial Number).
@@ -177,36 +175,48 @@ public:
         delay(100);
         sendReportCmd(0x0102); 
         esp_zb_lock_release();
+        _needs_immediate_report = false;
     }
 
     // Handles incoming write requests for attributes.
     void handleAttributeWrite(const esp_zb_zcl_set_attr_value_message_t *message) {
         if (!_source) return;
         if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_METERING) {
-            // Helper to safely unpack a 32-bit value from a 48-bit (6-byte) buffer
-            auto unpackU32 = [](const esp_zb_zcl_attribute_t* attr) -> uint32_t {
-                if (attr->data.type == ESP_ZB_ZCL_ATTR_TYPE_U48 && attr->data.size >= 4) {
-                    uint32_t val = 0;
-                    memcpy(&val, attr->data.value, sizeof(val));
-                    return val;
+            auto unpackU32 = [](const esp_zb_zcl_attribute_t* attr, uint32_t& out_val) -> bool {
+                if (attr->data.type != ESP_ZB_ZCL_ATTR_TYPE_U48) return false;
+                
+                uint64_t temp_val = 0;
+                // Copy up to 6 bytes, respecting buffer size to prevent overflow
+                memcpy(&temp_val, attr->data.value, attr->data.size > 6 ? 6 : attr->data.size);
+
+                // The value must fit in 32 bits for SN/Offset.
+                if (temp_val > UINT32_MAX) {
+                    Serial.printf("Error: Received U48 value %llu exceeds U32 max for attribute 0x%04X\n", temp_val, attr->id);
+                    return false;
                 }
-                return 0; // Or handle error
+                out_val = (uint32_t)temp_val;
+                return true;
             };
 
             uint16_t id = message->attribute.id;
-            uint32_t val = unpackU32(&message->attribute);
+            uint32_t val;
+            if (!unpackU32(&message->attribute, val)) return;
+
             bool changed = false;
 
-            if (id == 0x100) { 
+            if (id == kAttrIdOffset) { 
                 _source->setOffset((int32_t)val);
                 changed = true;
             }
-            else if (id == 0x102) { 
+            else if (id == kAttrIdSerialNumber) { 
                 _source->setSerialNumber(val);
                 changed = true;
             }
 
-            if (changed && _onSettingsChanged) _onSettingsChanged();
+            if (changed) {
+                _config_dirty = true; // Mark config as dirty for saving to NVS
+                _needs_immediate_report = true; // Trigger an immediate report of the new config
+            }
         }
     }
 
@@ -214,17 +224,17 @@ private:
     void sendReportCmd(uint16_t attrId, uint16_t clusterId = ESP_ZB_ZCL_CLUSTER_ID_METERING) {
         esp_zb_zcl_report_attr_cmd_t cmd;
         memset(&cmd, 0, sizeof(cmd));
+        // Возвращаем прямую отправку координатору, так как Binding Table может быть пустой
         cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
         cmd.clusterID = clusterId;
         cmd.attributeID = attrId;
         cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
         cmd.zcl_basic_cmd.src_endpoint = _endpoint;
-        cmd.zcl_basic_cmd.dst_endpoint = 1; 
-        cmd.zcl_basic_cmd.dst_addr_u.addr_short = 0x0000;
+        cmd.zcl_basic_cmd.dst_addr_u.addr_short = 0x0000; // Адрес координатора
+        cmd.zcl_basic_cmd.dst_endpoint = 1;               // Стандартный эндпоинт координатора
         esp_zb_zcl_report_attr_cmd_req(&cmd);
     }
 
-    SettingsChangedCallback _onSettingsChanged = nullptr;
     Source::WaterSource* _source = nullptr;
 
     bool _with_battery;
@@ -235,7 +245,8 @@ private:
     uint16_t _divisor = 1000;
 
     uint64_t _lastReportedValue = 0xFFFFFFFFFFFFFFFF; // Initialize to "unknown" to ensure first report
-    bool needs_immediate_report = false;
+    bool _needs_immediate_report = false;
+    volatile bool _config_dirty = false;
 };
 
 

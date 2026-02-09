@@ -15,6 +15,7 @@
 #include <Preferences.h>
 #include "nvs_flash.h"
 #include "esp_partition.h"
+#include <memory> // For std::unique_ptr
 
 // Abstraction Layers
 #include "utils.h"
@@ -34,6 +35,7 @@
 #define RS485_CONFIG     SERIAL_8N1
 #define PULSE_COLD_PIN   10
 #define PULSE_HOT_PIN    11
+#define BATTERY_ADC_PIN   34
 
 /* --- ZIGBEE CONFIGURATION --- */
 #define MODEL_ID "C6_WATER_METER"
@@ -42,14 +44,19 @@
 #define RECCONNECT_TIMEOUT 60000
 
 /* --- APPLICATION CONFIGURATION --- */
-// For testing, use Source::SourceType::Test or Driver::MeterModel::Mock
+constexpr bool kEnableTestIntervals = false; // Set to true for fast hourly/daily reports (10s/20s)
+
 // constexpr Source::SourceType COLD_TYPE = Source::SourceType::Test;
 // constexpr Source::SourceType HOT_TYPE  = Source::SourceType::Test;
 // constexpr uint32_t COLD_POOL_INTERVAL = 3000; // Интервал опроса для холодного канала (мс) Test
 // constexpr uint32_t HOT_POOL_INTERVAL  = 3000; // Интервал опроса для горячего канала (мс) Test
 
-constexpr uint32_t HEARTBEAT_INTERVAL = 60000 * 60; // Heartbeat interval for HA (ms)
+// constexpr uint32_t HEARTBEAT_INTERVAL = 60000; // Heartbeat interval for HA (ms)
+// constexpr uint32_t BATTERY_REPORT_INTERVAL = 60000; // Interval for reporting battery status (ms)
 
+/* PRODUCT CONFIGURATION */
+constexpr uint32_t HEARTBEAT_INTERVAL = 60000 * 30; // Heartbeat interval for HA (ms)
+constexpr uint32_t BATTERY_REPORT_INTERVAL = 60000 * 30; // Interval for reporting battery status (ms)
 constexpr uint32_t COLD_POOL_INTERVAL = 60000 * 5; // Polling interval for cold channel (ms)
 constexpr uint32_t HOT_POOL_INTERVAL  = 60000 * 5; // Polling interval for hot channel (ms)
 
@@ -63,43 +70,41 @@ constexpr bool NEED_RS485 = (COLD_TYPE == Source::SourceType::Smart || HOT_TYPE 
 
 /* --- GLOBAL OBJECTS --- */
 Preferences prefs;
-RS485Stream* rs485Bus = nullptr; 
+std::unique_ptr<RS485Stream> rs485Bus = nullptr; 
 
 // Zigbee Endpoints
 ZigbeeWaterMeter zigbeeCold(1, true); 
 ZigbeeWaterMeter zigbeeHot(2, false);
 
 // Interfaces (Pointers)
-Driver::SmartMeterDriver *coldDrv = nullptr;
-Driver::SmartMeterDriver *hotDrv = nullptr;
-Source::WaterSource *coldSrc = nullptr;
-Source::WaterSource *hotSrc = nullptr;
+std::unique_ptr<Driver::SmartMeterDriver> coldDrv = nullptr;
+std::unique_ptr<Driver::SmartMeterDriver> hotDrv = nullptr;
+std::unique_ptr<Source::WaterSource> coldSrc = nullptr;
+std::unique_ptr<Source::WaterSource> hotSrc = nullptr;
 
 /* --- ZIGBEE EVENT HANDLER --- */
 static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message) {
-    if (callback_id == ESP_ZB_CORE_IAS_ACE_ARM_CB_ID) {
-        auto *signal = (esp_zb_app_signal_t *)message;
-        esp_zb_app_signal_type_t sig_type = (esp_zb_app_signal_type_t)*signal->p_app_signal;
-        if (sig_type == ESP_ZB_ZDO_SIGNAL_LEAVE) {
-            Serial.println("Zigbee: Connection lost (Leave). Rebooting...");
-            Utils::flashLed(50, 0, 0, 500); // Red flash warning
-            if constexpr (NEED_RS485) digitalWrite(RS485_POWER_PIN, LOW);
-            delay(100);
-            esp_restart();
-        }
-
-        if (sig_type == ESP_ZB_BDB_SIGNAL_STEERING) {
-            esp_err_t *status = (esp_err_t *)esp_zb_app_signal_get_params(signal->p_app_signal);
-            if (*status == ESP_OK) {
-                Serial.println("Zigbee: Connected. Enabling RS485 power.");
-                if constexpr (NEED_RS485) digitalWrite(RS485_POWER_PIN, HIGH);
-            }
-        }
+    if (message == nullptr) {
+        return ESP_OK;  // Safety: некоторые callback могут приходить без данных
     }
 
+    // Handle attribute write commands from coordinator
+    if (callback_id == ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID) {
+        auto *msg = (esp_zb_zcl_set_attr_value_message_t *)message;
+        Utils::setLed(0, 30, 30);
+        for (auto ep : Zigbee.ep_objects) {
+            if (msg->info.dst_endpoint == ep->getEndpoint()) {
+                static_cast<ZigbeeWaterMeter*>(ep)->handleAttributeWrite(msg);
+                break;
+            }
+        }
+        return ESP_OK;
+    }
+
+    // Handle sleep signal
     if (callback_id == ESP_ZB_COMMON_SIGNAL_CAN_SLEEP) {
         Serial.println("Zigbee: Entering sleep mode...");
-        Serial.flush(); // Wait for message to be sent before sleeping
+        Serial.flush();
         
         if constexpr (NEED_RS485) {
             Serial1.end(); 
@@ -115,29 +120,57 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         return ESP_OK;
     }
 
-    if (callback_id == ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID) {
-        auto *msg = (esp_zb_zcl_set_attr_value_message_t *)message;
-        Utils::setLed(0, 30, 30); // Cyan flash on command from HA
-        for (auto ep : Zigbee.ep_objects) {
-            if (msg->info.dst_endpoint == ep->getEndpoint()) {
-                static_cast<ZigbeeWaterMeter*>(ep)->handleAttributeWrite(msg);
-                break;
-            }
-        }
+    // Handle Zigbee application signals (connection, steering, leave)
+    // Только для этих callback_id message является esp_zb_app_signal_t*
+    esp_zb_app_signal_t *signal = (esp_zb_app_signal_t *)message;
+    if (signal->p_app_signal == nullptr) {
+        return ESP_OK;  // Защита от невалидного сигнала
     }
+
+    esp_zb_app_signal_type_t sig_type = (esp_zb_app_signal_type_t)*signal->p_app_signal;
+    esp_err_t sig_status = signal->esp_err_status;
+
+    switch (sig_type) {
+        case ESP_ZB_ZDO_SIGNAL_LEAVE:
+            Serial.println("Zigbee: Connection lost (Leave). Rebooting...");
+            Utils::flashLed(50, 0, 0, 500);
+            if constexpr (NEED_RS485) digitalWrite(RS485_POWER_PIN, LOW);
+            delay(100);
+            esp_restart();
+            break;
+
+        case ESP_ZB_BDB_SIGNAL_STEERING:
+            if (sig_status == ESP_OK) {
+                Serial.println("Zigbee: Connected successfully. Enabling RS485 power.");
+                if constexpr (NEED_RS485) digitalWrite(RS485_POWER_PIN, HIGH);
+            } else {
+                Serial.printf("Zigbee: Steering failed with status 0x%x\n", sig_status);
+            }
+            break;
+
+        case ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP:
+            Serial.println("Zigbee: Device already commissioned, skipping pairing.");
+            if constexpr (NEED_RS485) digitalWrite(RS485_POWER_PIN, HIGH);
+            break;
+
+        default:
+            // Игнорируем другие сигналы (Production Update, Device Announce и т.д.)
+            break;
+    }
+    
     return ESP_OK;
 }
 
 /* --- INTERRUPTS (PulseSource Only) --- */
 void IRAM_ATTR isr_cold() { 
-    if(coldSrc && COLD_TYPE != Source::SourceType::Smart) {
-        static_cast<Source::PulseSource*>(coldSrc)->increment(); 
+    if(coldSrc) { // Проверка типа неявна в static_cast
+        static_cast<Source::PulseSource*>(coldSrc.get())->increment(); 
     }
 }
 
 void IRAM_ATTR isr_hot() { 
-    if(hotSrc && HOT_TYPE != Source::SourceType::Smart) {
-        static_cast<Source::PulseSource*>(hotSrc)->increment(); 
+    if(hotSrc) {
+        static_cast<Source::PulseSource*>(hotSrc.get())->increment(); 
     }
 }
 
@@ -214,7 +247,7 @@ void initHardware() {
         pinMode(RS485_POWER_PIN, OUTPUT);
         digitalWrite(RS485_POWER_PIN, HIGH); // Включаем питание шины
 
-        rs485Bus = new RS485Stream(&Serial1, RS485_EN);
+        rs485Bus = std::make_unique<RS485Stream>(&Serial1, RS485_EN);
         rs485Bus->begin(RS485_BAUD, RS485_CONFIG, RS485_RX, RS485_TX);
         rs485Bus->setTimeout(300);
     }
@@ -242,37 +275,45 @@ void initSources() {
     
     // 2. Create Drivers (Protocol Layer)
     if constexpr (COLD_TYPE == Source::SourceType::Smart) {
-        coldDrv = Driver::DriverFactory::create(COLD_DRV_MODEL, rs485Bus, c_sn);
-        if (coldDrv) coldDrv->setLogger(&Serial);
+        coldDrv.reset(Driver::DriverFactory::create(COLD_DRV_MODEL, rs485Bus.get(), c_sn));
+        if (coldDrv) coldDrv->setLogger(&Serial); // Передаем raw pointer для логирования
     } else {
         Serial.println("Cold driver not created");
     }
 
     if constexpr (HOT_TYPE == Source::SourceType::Smart) {
-        hotDrv = Driver::DriverFactory::create(HOT_DRV_MODEL, rs485Bus, h_sn);
+        hotDrv.reset(Driver::DriverFactory::create(HOT_DRV_MODEL, rs485Bus.get(), h_sn));
         if (hotDrv) hotDrv->setLogger(&Serial);
     } else {
         Serial.println("Hot driver not created");
     }
 
     // 3. Create Sources (Logic Layer)
-    coldSrc = Source::SourceFactory::create(COLD_TYPE, c_lit, PULSE_COLD_PIN, coldDrv);
-    hotSrc  = Source::SourceFactory::create(HOT_TYPE,  h_lit,  PULSE_HOT_PIN,  hotDrv);
+    coldSrc.reset(Source::SourceFactory::create(COLD_TYPE, c_lit, PULSE_COLD_PIN, coldDrv.get()));
+    hotSrc.reset(Source::SourceFactory::create(HOT_TYPE,  h_lit,  PULSE_HOT_PIN,  hotDrv.get()));
 
     // 4. Fine Tuning (Offsets & Start)
     if (coldSrc) { 
         coldSrc->setPollInterval(COLD_POOL_INTERVAL);
         coldSrc->setOffset(c_off); 
+        coldSrc->setTestMode(kEnableTestIntervals);
         coldSrc->setSerialNumber(c_sn);
-        coldSrc->begin(); 
+        coldSrc->begin();
+        if constexpr (COLD_TYPE == Source::SourceType::Pulse) {
+            attachInterrupt(digitalPinToInterrupt(PULSE_COLD_PIN), isr_cold, FALLING);
+        }
     } else {
         Serial.println("Cold source not created");
     }
     if (hotSrc) { 
         hotSrc->setPollInterval(HOT_POOL_INTERVAL);
         hotSrc->setOffset(h_off); 
+        hotSrc->setTestMode(kEnableTestIntervals);
         hotSrc->setSerialNumber(h_sn);
-        hotSrc->begin(); 
+        hotSrc->begin();
+        if constexpr (HOT_TYPE == Source::SourceType::Pulse) {
+            attachInterrupt(digitalPinToInterrupt(PULSE_HOT_PIN), isr_hot, FALLING);
+        }
     } else {
         Serial.println("Hot source not created");   
     }
@@ -280,12 +321,11 @@ void initSources() {
 
 void setupZigbee() {
     // Bind sources to endpoints
-    zigbeeCold.setSource(coldSrc);
-    zigbeeHot.setSource(hotSrc);
+    zigbeeCold.setSource(coldSrc.get());
+    zigbeeHot.setSource(hotSrc.get());
 
-    // Configure save callbacks
-    zigbeeCold.onSettingsChanged(saveConfiguration);
-    zigbeeHot.onSettingsChanged(saveConfiguration);
+    // Колбэк onSettingsChanged удален, чтобы избежать блокирующих записей NVS
+    // из задачи Zigbee. Сохранение теперь обрабатывается в основном цикле.
 
     // Register endpoints in the stack
     zigbeeCold.begin(); 
@@ -305,8 +345,6 @@ void setupZigbee() {
         Serial.println("Zigbee: CRITICAL ERROR STARTING STACK");
         Serial.println("Data corruption detected or Partition Scheme mismatch.");
         Serial.println("Hold BOOT button during startup to Factory Reset.");
-        // delay(5000);
-        // ESP.restart();
     }
     esp_zb_core_action_handler_register(zb_action_handler);
     esp_zb_set_tx_power(TX_POWER);
@@ -325,11 +363,14 @@ void loop() {
         }
         handleZigbeeReporting();
         handleAutoSave();
+        handleConfigSave();
     }
 
     // 3. UI and Service
     updateStatusIndication();
     checkServiceButton();
+    // Serial.println("Main loop heartbeat"); // Debug heartbeat to confirm loop is running
+    delay(10); // Даем время IDLE задаче и стеку Zigbee
 }
 
 /* --- BLOCK IMPLEMENTATIONS --- */
@@ -345,7 +386,8 @@ enum ReportState {
     IDLE, 
     PENDING_COLD_CONFIG, PENDING_HOT_CONFIG, 
     PENDING_COLD_HOURLY, PENDING_HOT_HOURLY, 
-    PENDING_COLD_VALUE,  PENDING_HOT_VALUE 
+    PENDING_COLD_VALUE,  PENDING_HOT_VALUE,
+    PENDING_HEARTBEAT_COLD // A state specifically for the heartbeat sequence
 };
 static ReportState reportState = IDLE;
 static uint32_t nextActionTime = 0;
@@ -374,13 +416,16 @@ void handleZigbeeReporting() {
                     nextActionTime = now + 100;
                 }
                 break;
+            case PENDING_HEARTBEAT_COLD: // Heartbeat always reports both channels
+                zigbeeCold.reportValue();
+                reportState = PENDING_HOT_VALUE; // Unconditionally chain to hot report
+                nextActionTime = now + 100;
+                break;
             case PENDING_COLD_VALUE:
                 zigbeeCold.reportValue();
-                // Check if hot needs reporting (chaining)
-                // We cannot use local variables from loop here,
-                // so we rely on re-checking shouldReport() or timeout.
-                // Since timeout is shared, it's easier to check shouldReport() for Hot.
-                if (zigbeeHot.shouldReport() || (now - last_heartbeat < 1000)) { // < 1000 means it was a heartbeat
+                // This was an on-change report for cold.
+                // Only chain the hot report if its value has also changed.
+                if (zigbeeHot.shouldReport()) {
                     reportState = PENDING_HOT_VALUE;
                     nextActionTime = now + 100;
                 }
@@ -417,23 +462,29 @@ void handleZigbeeReporting() {
     // Total value reports (on change or heartbeat)
     bool coldNeeds = zigbeeCold.shouldReport();
     bool hotNeeds  = zigbeeHot.shouldReport();
-    bool timeout = (now - last_heartbeat >= HEARTBEAT_INTERVAL);
-    if (coldNeeds || hotNeeds || timeout) {
-        last_heartbeat = now;
-        
-        if (coldNeeds || timeout) {
-            reportState = PENDING_COLD_VALUE;
-            nextActionTime = now;
-        } else if (hotNeeds) { // Only hot channel needs reporting
-            zigbeeHot.reportValue();
-        }
+    bool isHeartbeat = (now - last_heartbeat >= HEARTBEAT_INTERVAL);
 
-        if (coldNeeds || hotNeeds) Utils::setLed(30, 30, 30);
+    if (isHeartbeat) {
+        Serial.println("Scheduling report -> Heartbeat");
+        last_heartbeat = now;
+        reportState = PENDING_HEARTBEAT_COLD; // Start the full heartbeat sequence
+        nextActionTime = now;
+        Utils::setLed(30, 30, 30);
+    } else if (coldNeeds || hotNeeds) {
+        // Serial.printf("Scheduling report -> On-change. Cold: %s, Hot: %s\n", coldNeeds ? "YES" : "no", hotNeeds ? "YES" : "no");
+        // For on-change reports, schedule only what's needed
+        if (coldNeeds) {
+            reportState = PENDING_COLD_VALUE;
+        } else { // This means only hotNeeds is true
+            reportState = PENDING_HOT_VALUE;
+        }
+        nextActionTime = now;
+        Utils::setLed(30, 30, 30);
     }
 
     // Battery report once an hour
     static uint32_t last_battery = 0;
-    if (now - last_battery >= 3600000 || last_battery == 0) {
+    if (now - last_battery >= BATTERY_REPORT_INTERVAL || last_battery == 0) {
         last_battery = now;
         if (zigbeeCold.battery_supported()) zigbeeCold.reportBattery();
         if (zigbeeHot.battery_supported())  zigbeeHot.reportBattery();
@@ -446,6 +497,15 @@ void handleAutoSave() {
     if (millis() - last_save >= 900000) { 
         last_save = millis();
         saveConfiguration(); 
+    }
+}
+
+// 3.b. Сохранение конфигурации, если она была изменена через Zigbee
+void handleConfigSave() {
+    if (zigbeeCold.isConfigDirty() || zigbeeHot.isConfigDirty()) {
+        saveConfiguration();
+        zigbeeCold.clearConfigDirty();
+        zigbeeHot.clearConfigDirty();
     }
 }
 
