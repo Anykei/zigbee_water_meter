@@ -53,8 +53,8 @@ jobs:
           #endif  // INCLUDE_VERSION_H_
           EOF
 
-      - name: Build Firmware
-        run: |
-          # Пример для CMake
-          cmake -B build -DVERSION=${{ env.FW_VERSION }}
-          cmake --build build
+      # - name: Build Firmware
+      #   run: |
+      #     # Пример для CMake
+      #     cmake -B build -DVERSION=${{ env.FW_VERSION }}
+      #     cmake --build build
