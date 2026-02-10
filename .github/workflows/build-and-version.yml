@@ -24,6 +24,28 @@ jobs:
           echo "FW_VERSION=${VERSION}" >> $GITHUB_ENV
           echo "GIT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
         
+      - name: Extract Version Components
+        id: version_components
+        run: |
+          # Устанавливаем значения по умолчанию для сборок не из тега
+          MAJOR=0
+          MINOR=0
+          PATCH=0
+          
+          # Если сборка запущена тегом, парсим его
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION_TAG="${{ github.ref_name }}"
+            VERSION_TAG=${VERSION_TAG#v} # Удаляем префикс 'v'
+            IFS='.' read -r -a VERSION_PARTS <<< "$VERSION_TAG"
+            MAJOR=${VERSION_PARTS[0]:-0}
+            MINOR=${VERSION_PARTS[1]:-0}
+            PATCH=${VERSION_PARTS[2]:-0}
+          fi
+          
+          echo "MAJOR=${MAJOR}" >> $GITHUB_ENV
+          echo "MINOR=${MINOR}" >> $GITHUB_ENV
+          echo "PATCH=${PATCH}" >> $GITHUB_ENV
+
       - name: Generate version.h
         run: |
           mkdir -p include
@@ -36,9 +58,9 @@ jobs:
           inline constexpr std::string_view kFirmwareVersion = "${{ env.FW_VERSION }}";
           inline constexpr std::string_view kGitSha = "${{ env.GIT_SHA }}";
           inline constexpr std::string_view kBuildTimestamp = "$(date -u +'%Y-%m-%dT%H:%M:%SZ')";
-          inline constexpr int kMajor = 1; 
-          inline constexpr int kMinor = 2; 
-          inline constexpr int kPatch = 3;
+          inline constexpr int kMajor = ${{ env.MAJOR }};
+          inline constexpr int kMinor = ${{ env.MINOR }};
+          inline constexpr int kPatch = ${{ env.PATCH }};
           }
           #endif
           EOF
