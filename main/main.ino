@@ -28,8 +28,7 @@
 #include "sources/factory_source.h"
 
 /* --- VERSION --- */
-#define FIRMWARE_VERSION "1.0.0"
-#define BUILD_DATE "2026-02-09"
+#include "include/version.h"
 
 /* --- HARDWARE CONFIGURATION --- */
 #define RGB_LED_PIN      8
@@ -64,10 +63,10 @@ constexpr bool kEnableTestIntervals = false; // Set to true for fast hourly/dail
 /* PRODUCT CONFIGURATION */
 constexpr uint32_t HEARTBEAT_INTERVAL = 60000 * 30; // Heartbeat interval for HA (ms)
 constexpr uint32_t BATTERY_REPORT_INTERVAL = 60000 * 30; // Interval for reporting battery status (ms)
-constexpr uint32_t COLD_POOL_INTERVAL = 60000 * 5; // Polling interval for cold channel (ms)
-constexpr uint32_t HOT_POOL_INTERVAL  = 60000 * 5; // Polling interval for hot channel (ms)
+constexpr uint32_t COLD_POOL_INTERVAL = 60000 * 30; // Polling interval for cold channel (ms)
+constexpr uint32_t HOT_POOL_INTERVAL  = 60000 * 30; // Polling interval for hot channel (ms)
 constexpr uint32_t DEEP_SLEEP_THRESHOLD = 60; // Time in seconds before entering deep sleep when idle
-constexpr uint32_t LOOP_IDLE_DELAY = 5000; // Main loop idle delay (ms)
+constexpr uint32_t LOOP_IDLE_DELAY = 15000; // Main loop idle delay (ms)
 
 constexpr Source::SourceType COLD_TYPE = Source::SourceType::Smart;
 constexpr Source::SourceType HOT_TYPE = Source::SourceType::Smart;
@@ -235,8 +234,8 @@ void setup() {
     
     // Print firmware version
     Serial.println("\n╔════════════════════════════════════════════════════════╗");
-    Serial.printf("║  ESP32-C6 Zigbee Water Meter v%s              ║\n", FIRMWARE_VERSION);
-    Serial.printf("║  Build: %s                              ║\n", BUILD_DATE);
+    Serial.printf("║  ESP32-C6 Zigbee Water Meter v%s              ║\n", firmware::version::kFirmwareVersion.data());
+    Serial.printf("║  Build: %s                              ║\n", firmware::version::kBuildTimestamp.data());
     Serial.println("║  Copyright 2026 Andrey Nemenko                       ║");
     Serial.println("╚════════════════════════════════════════════════════════╝\n");
     

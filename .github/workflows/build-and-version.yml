@@ -53,8 +53,27 @@ jobs:
           #endif  // INCLUDE_VERSION_H_
           EOF
 
-      # - name: Build Firmware
-      #   run: |
-      #     # Пример для CMake
-      #     cmake -B build -DVERSION=${{ env.FW_VERSION }}
-      #     cmake --build build
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade platformio
+          pip install littlefs-python cython setuptools wheel pyyaml
+
+          # Перейдите в любую временную директорию
+          cd /tmp
+          git clone https://github.com/Jason2866/pyfatfs
+          cd pyfatfs
+
+          # Принудительно генерируем wrapper.c через Cython
+          /opt/homebrew/Cellar/platformio/6.1.19/libexec/bin/python -m cython fatfs/wrapper.pyx
+
+          # Устанавливаем библиотеку из локальной папки в PlatformIO
+          /opt/homebrew/Cellar/platformio/6.1.19/libexec/bin/python -m pip install .
+
+      - name: Build Firmware
+        run: pio run
