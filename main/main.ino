@@ -568,7 +568,8 @@ void updateStatusIndication() {
             t ? Utils::setLed(20, 20, 0) : Utils::setLed(0, 0, 0);
         }
     } else {
-        Utils::setLed(0, 1, 0); // Heartbeat LED
+        Utils::setLed(0, 0, 0); // Heartbeat LED
+        // Utils::setLed(0, 1, 0); // Heartbeat LED
     }
 }
 
