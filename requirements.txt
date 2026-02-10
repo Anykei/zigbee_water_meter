@@ -1,0 +1,6 @@
+platformio
+cython
+setuptools
+wheel
+pyyaml
+littlefs-python

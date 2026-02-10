@@ -23,7 +23,7 @@ jobs:
           VERSION=$(git describe --tags --always --dirty)
           echo "FW_VERSION=${VERSION}" >> $GITHUB_ENV
           echo "GIT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-
+        
       - name: Generate version.h
         run: |
           mkdir -p include
@@ -37,7 +37,7 @@ jobs:
           inline constexpr std::string_view kGitSha = "${{ env.GIT_SHA }}";
           inline constexpr std::string_view kBuildTimestamp = "$(date -u +'%Y-%m-%dT%H:%M:%SZ')";
           inline constexpr int kMajor = 1; 
-          inline constexpr int kMinor = 2;
+          inline constexpr int kMinor = 2; 
           inline constexpr int kPatch = 3;
           }
           #endif
@@ -47,30 +47,42 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip' # Кэширование pip-пакетов
+          cache: 'pip' # Автоматически кэширует всё, что найдет в requirements.txt
 
       - name: Cache PlatformIO
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cache/pip
             ~/.platformio
-          key: ${{ runner.os }}-pio
+            ~/.cache/pip
+          key: ${{ runner.os }}-pio-${{ hashFiles('**/platformio.ini', '**/requirements.txt') }}
 
-      - name: Install Dependencies and PlatformIO
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade platformio cython setuptools wheel pyyaml littlefs-python
+          # 1. Установка из вашего файла требований
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          
+          # 2. Установка базовых инструментов, если их нет в requirements.txt
+          pip install platformio cython setuptools wheel pyyaml littlefs-python
 
-      - name: Install pyfatfs (Custom Build)
+      - name: Install pyfatfs (Custom Build for M1/Ubuntu compatibility)
         run: |
           cd /tmp
           git clone https://github.com/Jason2866/pyfatfs
           cd pyfatfs
-          # Используем просто python, так как мы в настроенном окружении
+          # Генерируем C-код из Cython шаблонов
           python -m cython fatfs/wrapper.pyx
+          # Устанавливаем в текущее окружение Python
           pip install .
+          # Возвращаемся в рабочую директорию проекта
           cd ${{ github.workspace }}
 
       - name: Build Firmware
         run: pio run
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ env.FW_VERSION }}
+          path: .pio/build/**/firmware.bin
