@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   build:
+    if: "!contains(github.event.head_commit.message, 'chore(release):')"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -112,7 +113,7 @@ jobs:
           name: firmware-${{ env.FW_VERSION }}
           path: .pio/build/**/firmware.bin
 
-      - name: Bump Version & Push Tag
+      - name: Create Release Commit & Tag
         if: github.ref == 'refs/heads/main'
         run: |
           git config user.name "github-actions[bot]"
@@ -132,9 +133,13 @@ jobs:
           NEW_PATCH=$((PATCH + 1))
           NEW_TAG="v$MAJOR.$MINOR.$NEW_PATCH"
           
-          echo "Build successful. Pushing new tag: $NEW_TAG"
+          echo "Build successful. Creating release commit and tag: $NEW_TAG"
+          
+          # Создаем пустой коммит, чтобы привязать к нему тег и зафиксировать версию в истории
+          git commit --allow-empty -m "chore(release): Release ${NEW_TAG}"
           git tag $NEW_TAG
-          git push origin $NEW_TAG
+          # Пушим коммит в main и все теги, которые на него ссылаются
+          git push origin main --follow-tags
 
       - name: Prepare Release Asset
         if: startsWith(github.ref, 'refs/tags/')
