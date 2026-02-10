@@ -155,3 +155,33 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
+          
+      - name: Prepare Release Asset
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          # Находим бинарник и переименовываем его для релиза
+          # Используем имя проекта, версию и архитектуру (например, esp32)
+          mkdir -p release_assets
+          cp .pio/build/*/firmware.bin release_assets/zigbee_water_meter_${{ github.ref_name }}.bin
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release_assets/*.bin
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## IoT Firmware Release ${{ github.ref_name }}
+            
+            **Metadata:**
+            - Commit: `${{ env.GIT_SHA }}`
+            - Build Date: `$(date -u +'%Y-%m-%d %H:%M:%SZ')`
+            
+            **Automated Build Artifacts:**
+            Скачайте `.bin` файл ниже и прошейте ваше устройство.
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
