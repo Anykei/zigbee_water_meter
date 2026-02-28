@@ -5,6 +5,7 @@
 #include "esp_zigbee_core.h"
 #include <Preferences.h>
 #include <functional>
+#include <atomic>
 #include "sources/water_source.h"
 
 typedef std::function<void()> SettingsChangedCallback;
@@ -80,7 +81,6 @@ public:
         esp_zb_attribute_list_t *m_attr = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_METERING);
         uint8_t def_u48[6] = {0};
         uint8_t uom = 0x07; uint8_t fmt = 0x4B; uint8_t type = 0x02;
-        int32_t def_off = 0; uint32_t def_sn = 0;
 
         // Main Value (0x0000)
         esp_zb_cluster_add_attr(m_attr, ESP_ZB_ZCL_CLUSTER_ID_METERING, 0x0000, ESP_ZB_ZCL_ATTR_TYPE_U48, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, def_u48);
@@ -131,7 +131,7 @@ public:
         sendReportCmd(0x0400); 
         esp_zb_lock_release();
         
-        Serial.printf("EP %d: Reported LAST HOUR consumption: %u\n", _endpoint, hourly);
+        Serial.printf("EP %d: Reported LAST HOUR consumption: %lu\n", _endpoint, (unsigned long)hourly);
     }
 
     // Reports the battery percentage.
@@ -167,14 +167,20 @@ public:
         uint8_t buf_off[6]; packU48((uint32_t)_source->getOffset(), buf_off);
         uint8_t buf_sn[6];  packU48(_source->getSerialNumber(), buf_sn);
 
+        // Report offset
         esp_zb_lock_acquire(portMAX_DELAY);
         esp_zb_zcl_set_attribute_val(_endpoint, ESP_ZB_ZCL_CLUSTER_ID_METERING, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, 0x0100, buf_off, false);
-        esp_zb_zcl_set_attribute_val(_endpoint, ESP_ZB_ZCL_CLUSTER_ID_METERING, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, 0x0102, buf_sn, false);
-        
-        sendReportCmd(0x0100); 
-        delay(100);
-        sendReportCmd(0x0102); 
+        sendReportCmd(0x0100);
         esp_zb_lock_release();
+
+        delay(100); // Gap between reports — lock released, stack can process
+
+        // Report serial number
+        esp_zb_lock_acquire(portMAX_DELAY);
+        esp_zb_zcl_set_attribute_val(_endpoint, ESP_ZB_ZCL_CLUSTER_ID_METERING, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, 0x0102, buf_sn, false);
+        sendReportCmd(0x0102);
+        esp_zb_lock_release();
+
         _needs_immediate_report = false;
     }
 
@@ -246,7 +252,7 @@ private:
 
     uint64_t _lastReportedValue = 0xFFFFFFFFFFFFFFFF; // Initialize to "unknown" to ensure first report
     bool _needs_immediate_report = false;
-    volatile bool _config_dirty = false;
+    std::atomic<bool> _config_dirty{false};
 };
 
 

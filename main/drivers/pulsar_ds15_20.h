@@ -62,7 +62,7 @@ private:
         packet[len++] = crc & 0xFF; packet[len++] = (crc >> 8) & 0xFF;
 
         if (log_serial) {
-            log_serial->printf(">>> TX [%08u] Vol: ", _address);
+            log_serial->printf(">>> TX [%08lu] Vol: ", (unsigned long)_address);
             for(int i=0; i<len; i++) log_serial->printf("%02X ", packet[i]);
             log_serial->println();
         }
@@ -75,7 +75,7 @@ private:
         size_t rxLen = _transport->readBytes(res, 64);
         
         if (log_serial && rxLen > 0) {
-            log_serial->printf("<<< RX [%08u]: ", _address);
+            log_serial->printf("<<< RX [%08lu]: ", (unsigned long)_address);
             for(int i=0; i<rxLen; i++) log_serial->printf("%02X ", res[i]);
             log_serial->println();
         }
@@ -98,7 +98,7 @@ private:
         uint16_t crc = calculateCRC(packet, len);
         packet[len++] = crc & 0xFF; packet[len++] = (crc >> 8) & 0xFF;
 
-        if (log_serial) log_serial->printf(">>> TX [%08u] Param 0x%04X\n", _address, paramId);
+        if (log_serial) log_serial->printf(">>> TX [%08lu] Param 0x%04X\n", (unsigned long)_address, paramId);
 
         while(_transport->available()) _transport->read();
         _transport->write(packet, len); _transport->flush();

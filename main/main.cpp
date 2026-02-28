@@ -28,39 +28,76 @@
 #include "sources/factory_source.h"
 
 /* --- VERSION --- */
-#include "include/version.h"
+#include "../include/version.h"
 
-/* --- HARDWARE CONFIGURATION --- */
-#define RGB_LED_PIN      8
+/* --- HARDWARE CONFIGURATION (from build_flags, with safe defaults) --- */
+#ifndef RGB_LED_PIN
+#define RGB_LED_PIN -1
+#endif
+#ifndef GPIO_STATUS_LED_PIN
+  #if defined(LED_BUILTIN)
+    #define GPIO_STATUS_LED_PIN LED_BUILTIN
+  #else
+    #define GPIO_STATUS_LED_PIN -1
+  #endif
+#endif
+#ifndef GPIO_STATUS_LED_ACTIVE_LOW
+#define GPIO_STATUS_LED_ACTIVE_LOW 0
+#endif
+#ifndef BOOT_BUTTON_PIN
 #define BOOT_BUTTON_PIN  9
+#endif
+#ifndef RS485_POWER_PIN
 #define RS485_POWER_PIN  18
+#endif
+#ifndef RS485_RX
 #define RS485_RX         21
+#endif
+#ifndef RS485_TX
 #define RS485_TX         20
+#endif
+#ifndef RS485_EN
 #define RS485_EN         19
+#endif
+#ifndef RS485_BAUD
 #define RS485_BAUD       9600
+#endif
 #define RS485_CONFIG     SERIAL_8N1
+#ifndef PULSE_COLD_PIN
 #define PULSE_COLD_PIN   10
+#endif
+#ifndef PULSE_HOT_PIN
 #define PULSE_HOT_PIN    11
-#define BATTERY_ADC_PIN   34
+#endif
 
-/* --- ZIGBEE CONFIGURATION --- */
+/* --- ZIGBEE CONFIGURATION (from build_flags, with safe defaults) --- */
+#ifndef MODEL_ID
 #define MODEL_ID "C6_WATER_METER"
+#endif
+#ifndef MANUFACTURER_NAME
 #define MANUFACTURER_NAME "MuseLab"
+#endif
+#ifndef TX_POWER
 #define TX_POWER 20
+#endif
 #define RECCONNECT_TIMEOUT 60000
 
 /* --- APPLICATION CONFIGURATION --- */
 constexpr bool kEnableTestIntervals = false; // Set to true for fast hourly/daily reports (10s/20s)
+constexpr uint32_t COMMISSIONING_AWAKE_MS = 180000; // Keep device awake for interview/configure window
 
-// constexpr Source::SourceType COLD_TYPE = Source::SourceType::Test;
-// constexpr Source::SourceType HOT_TYPE  = Source::SourceType::Test;
-// constexpr uint32_t COLD_POOL_INTERVAL = 3000; // Интервал опроса для холодного канала (мс) Test
-// constexpr uint32_t HOT_POOL_INTERVAL  = 3000; // Интервал опроса для горячего канала (мс) Test
+#ifdef TEST
+constexpr Source::SourceType COLD_TYPE = Source::SourceType::Test;
+constexpr Source::SourceType HOT_TYPE  = Source::SourceType::Test;
+constexpr uint32_t COLD_POOL_INTERVAL = 3000; // Интервал опроса для холодного канала (мс) Test
+constexpr uint32_t HOT_POOL_INTERVAL  = 3000; // Интервал опроса для горячего канала (мс) Test
 
-// constexpr uint32_t HEARTBEAT_INTERVAL = 60000; // Heartbeat interval for HA (ms)
-// constexpr uint32_t BATTERY_REPORT_INTERVAL = 60000; // Interval for reporting battery status (ms)
+constexpr uint32_t HEARTBEAT_INTERVAL = 60000; // Heartbeat interval for HA (ms)
+constexpr uint32_t BATTERY_REPORT_INTERVAL = 60000; // Interval for reporting battery status (ms)
+constexpr uint32_t DEEP_SLEEP_THRESHOLD = 3600; // Keep device awake longer in test mode (seconds)
+constexpr uint32_t LOOP_IDLE_DELAY = 100; // Main loop idle delay for test mode (ms)
 
-/* PRODUCT CONFIGURATION */
+#else
 constexpr uint32_t HEARTBEAT_INTERVAL = 60000 * 30; // Heartbeat interval for HA (ms)
 constexpr uint32_t BATTERY_REPORT_INTERVAL = 60000 * 30; // Interval for reporting battery status (ms)
 constexpr uint32_t COLD_POOL_INTERVAL = 60000 * 30; // Polling interval for cold channel (ms)
@@ -70,11 +107,43 @@ constexpr uint32_t LOOP_IDLE_DELAY = 15000; // Main loop idle delay (ms)
 
 constexpr Source::SourceType COLD_TYPE = Source::SourceType::Smart;
 constexpr Source::SourceType HOT_TYPE = Source::SourceType::Smart;
+# endif
+
 
 constexpr Driver::MeterModel COLD_DRV_MODEL = Driver::MeterModel::Pulsar_Du_15_20;
 constexpr Driver::MeterModel HOT_DRV_MODEL = Driver::MeterModel::Pulsar_Du_15_20;
 
 constexpr bool NEED_RS485 = (COLD_TYPE == Source::SourceType::Smart || HOT_TYPE == Source::SourceType::Smart);
+constexpr bool HAS_RGB_STATUS_LED  = (RGB_LED_PIN >= 0);
+constexpr bool HAS_GPIO_STATUS_LED = (GPIO_STATUS_LED_PIN >= 0);
+
+static uint32_t g_join_time_ms = 0;
+static bool g_sleep_enabled_runtime = false;
+
+inline void StatusLedRaw(bool on) {
+    if constexpr (HAS_GPIO_STATUS_LED) {
+        const bool level = GPIO_STATUS_LED_ACTIVE_LOW ? !on : on;
+        digitalWrite(GPIO_STATUS_LED_PIN, level ? HIGH : LOW);
+    }
+}
+
+inline void StatusLedSet(uint8_t r, uint8_t g, uint8_t b) {
+    if constexpr (HAS_RGB_STATUS_LED) {
+        Utils::setLed(r, g, b);
+    } else if constexpr (HAS_GPIO_STATUS_LED) {
+        StatusLedRaw((r > 0) || (g > 0) || (b > 0));
+    }
+}
+
+inline void StatusLedFlash(uint8_t r, uint8_t g, uint8_t b, uint32_t ms) {
+    if constexpr (HAS_RGB_STATUS_LED) {
+        Utils::flashLed(r, g, b, ms);
+    } else if constexpr (HAS_GPIO_STATUS_LED) {
+        StatusLedSet(r, g, b);
+        delay(ms);
+        StatusLedSet(0, 0, 0);
+    }
+}
 
 /* --- GLOBAL OBJECTS --- */
 Preferences prefs;
@@ -99,7 +168,7 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
     // Handle attribute write commands from coordinator
     if (callback_id == ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID) {
         auto *msg = (esp_zb_zcl_set_attr_value_message_t *)message;
-        Utils::setLed(0, 30, 30);
+        StatusLedSet(0, 30, 30);
         for (auto ep : Zigbee.ep_objects) {
             if (msg->info.dst_endpoint == ep->getEndpoint()) {
                 static_cast<ZigbeeWaterMeter*>(ep)->handleAttributeWrite(msg);
@@ -112,7 +181,7 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
     // Handle sleep signal (End Device only)
     // NOTE: For ED, sleep is managed automatically by the stack.
     // This callback is informational and should NOT call esp_zb_sleep_now().
-    if (callback_id == ESP_ZB_COMMON_SIGNAL_CAN_SLEEP) {
+    if (callback_id == (esp_zb_core_action_callback_id_t)ESP_ZB_COMMON_SIGNAL_CAN_SLEEP) {
         // Stack will automatically enter light sleep between polls.
         // We don't disable RS485 power here because:
         // 1. Light sleep keeps peripherals powered
@@ -134,7 +203,7 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
     switch (sig_type) {
         case ESP_ZB_ZDO_SIGNAL_LEAVE:
             Serial.println("Zigbee: Connection lost (Leave). Rebooting...");
-            Utils::flashLed(50, 0, 0, 500);
+            StatusLedFlash(50, 0, 0, 500);
             if constexpr (NEED_RS485) digitalWrite(RS485_POWER_PIN, LOW);
             delay(100);
             esp_restart();
@@ -144,6 +213,10 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
             if (sig_status == ESP_OK) {
                 Serial.println("Zigbee: Connected successfully. Enabling RS485 power.");
                 if constexpr (NEED_RS485) digitalWrite(RS485_POWER_PIN, HIGH);
+                g_join_time_ms = millis();
+                g_sleep_enabled_runtime = false;
+                esp_zb_sleep_enable(false);
+                Serial.println("Zigbee: Sleep temporarily disabled for interview window.");
             } else {
                 Serial.printf("Zigbee: Steering failed with status 0x%x\n", sig_status);
             }
@@ -152,6 +225,10 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         case ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP:
             Serial.println("Zigbee: Device already commissioned, skipping pairing.");
             if constexpr (NEED_RS485) digitalWrite(RS485_POWER_PIN, HIGH);
+            g_join_time_ms = millis();
+            g_sleep_enabled_runtime = false;
+            esp_zb_sleep_enable(false);
+            Serial.println("Zigbee: Sleep temporarily disabled after startup.");
             break;
 
         default:
@@ -203,7 +280,7 @@ void saveConfiguration() {
 void checkBootRecovery() {
     if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
         Serial.println("\n!!! BOOT BUTTON HELD - RECOVERY MODE !!!");
-        Utils::setLed(50, 0, 0); // Red warning
+        StatusLedSet(50, 0, 0); // Red warning
         delay(3000); // Wait to confirm intention
         
         if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
@@ -220,12 +297,26 @@ void checkBootRecovery() {
                 Serial.println("Partition 'zb_storage' not found!");
             }
 
-            Utils::flashLed(0, 50, 0, 1000); // Green success
+            StatusLedFlash(0, 50, 0, 1000); // Green success
             Serial.println("Restarting...");
             ESP.restart();
         }
     }
 }
+
+/* --- Forward declarations (needed because PlatformIO compiles .cpp) --- */
+void initHardware();
+void checkBootRecovery();
+void loadSystemData();
+void initSources();
+void setupZigbee();
+void updateSources();
+void handleZigbeeReporting();
+void handleAutoSave();
+void handleConfigSave();
+void updateStatusIndication();
+void checkServiceButton();
+void saveConfiguration();
 
 // Standard Arduino setup function.
 void setup() {
@@ -261,12 +352,16 @@ void setup() {
     setupZigbee();     // Layer 3: Network Stack
     
     Serial.println("--- System initialized and running ---");
-    Utils::flashLed(0, 30, 0, 1000); // Final green signal
+    StatusLedFlash(0, 30, 0, 1000); // Final green signal
 }
 
 void initHardware() {
     Serial.begin(115200);
-    Utils::setLed(30, 0, 0); // Статус: Загрузка
+    if constexpr (HAS_GPIO_STATUS_LED) {
+        pinMode(GPIO_STATUS_LED_PIN, OUTPUT);
+        StatusLedRaw(false);
+    }
+    StatusLedSet(30, 0, 0); // Статус: Загрузка
 
     // Шина данных
     if constexpr (NEED_RS485) {
@@ -363,9 +458,10 @@ void setupZigbee() {
     // Configure sleep before starting the stack
     // Set threshold: device will enter deep sleep if idle time > 60 seconds
     esp_zb_sleep_set_threshold(DEEP_SLEEP_THRESHOLD);  
-    esp_zb_sleep_enable(true);
+    esp_zb_sleep_enable(false);
+    g_sleep_enabled_runtime = false;
     
-    Serial.printf("Zigbee: Sleep enabled with %us threshold for deep sleep optimization\n", DEEP_SLEEP_THRESHOLD);
+    Serial.printf("Zigbee: Sleep deferred. Threshold=%lus\n", (unsigned long)DEEP_SLEEP_THRESHOLD);
 
     // Start the stack
     if(!Zigbee.begin(ZIGBEE_END_DEVICE)) {
@@ -401,6 +497,13 @@ void loop() {
             Serial.println("Application: Zigbee.connected() is true. Main logic is now active.");
             connected_logged = true;
             last_sleep_cycle_start = now;
+            if (g_join_time_ms == 0) g_join_time_ms = now;
+        }
+
+        if (!g_sleep_enabled_runtime && g_join_time_ms != 0 && (now - g_join_time_ms) >= COMMISSIONING_AWAKE_MS) {
+            esp_zb_sleep_enable(true);
+            g_sleep_enabled_runtime = true;
+            Serial.printf("Zigbee: Sleep enabled after %lu ms commissioning window.\n", (unsigned long)COMMISSIONING_AWAKE_MS);
         }
         handleZigbeeReporting();
         handleAutoSave();
@@ -416,8 +519,6 @@ void loop() {
     if (now - last_loop_log >= 120000) {
         last_loop_log = now;
         uint32_t sleep_cycle_duration = now - last_sleep_cycle_start;
-        // Reset cycle start for next measurement
-        uint32_t prev_cycle_start = last_sleep_cycle_start;
         last_sleep_cycle_start = now;
         
         Serial.printf("System: Loop alive. Connected=%s, Uptime=%lu min, SleepCycleDuration=%lu ms\n", 
@@ -505,7 +606,8 @@ void handleZigbeeReporting() {
         reportState = PENDING_COLD_HOURLY;
         nextActionTime = now;
     } else if (hotSrc && hotSrc->hasHourChanged()) {
-        zigbeeHot.reportHourly(); // Only hot
+        reportState = PENDING_HOT_HOURLY;
+        nextActionTime = now;
     }
 
     // Total value reports (on change or heartbeat)
@@ -518,7 +620,7 @@ void handleZigbeeReporting() {
         last_heartbeat = now;
         reportState = PENDING_HEARTBEAT_COLD; // Start the full heartbeat sequence
         nextActionTime = now;
-        Utils::setLed(30, 30, 30);
+        StatusLedSet(30, 30, 30);
     } else if (coldNeeds || hotNeeds) {
         // Serial.printf("Scheduling report -> On-change. Cold: %s, Hot: %s\n", coldNeeds ? "YES" : "no", hotNeeds ? "YES" : "no");
         // For on-change reports, schedule only what's needed
@@ -528,7 +630,7 @@ void handleZigbeeReporting() {
             reportState = PENDING_HOT_VALUE;
         }
         nextActionTime = now;
-        Utils::setLed(30, 30, 30);
+        StatusLedSet(30, 30, 30);
     }
 
     // Battery report once an hour
@@ -565,11 +667,11 @@ void updateStatusIndication() {
         if (millis() - last_blink > 500) {
             last_blink = millis();
             static bool t = false; t = !t;
-            t ? Utils::setLed(20, 20, 0) : Utils::setLed(0, 0, 0);
+            t ? StatusLedSet(20, 20, 0) : StatusLedSet(0, 0, 0);
         }
     } else {
-        Utils::setLed(0, 0, 0); // Heartbeat LED
-        // Utils::setLed(0, 1, 0); // Heartbeat LED
+        StatusLedSet(0, 0, 0); // Heartbeat LED
+        // StatusLedSet(0, 1, 0); // Heartbeat LED
     }
 }
 
@@ -580,7 +682,7 @@ void checkServiceButton() {
         if (press_start == 0) {
             press_start = millis();
         } else if (millis() - press_start > 3000) {
-            Utils::flashLed(50, 0, 0, 1000);
+            StatusLedFlash(50, 0, 0, 1000);
             Zigbee.factoryReset();
             ESP.restart();
         }

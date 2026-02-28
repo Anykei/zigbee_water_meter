@@ -10,10 +10,8 @@ namespace Source {
 class PulseSource : public WaterSource {
 private:
     uint8_t _pin;
-    volatile uint64_t _liters = 0; // volatile по-прежнему полезен
-    
-    // Параметры антидребезга
-    uint32_t _debounceMs = 50; 
+    uint32_t _debounceMs = 50;
+    volatile uint64_t _liters = 0; 
     volatile uint32_t _lastPulseTime = 0;
     volatile bool _pulseDetected = false;
     portMUX_TYPE _spinlock = portMUX_INITIALIZER_UNLOCKED;
@@ -43,7 +41,7 @@ public:
         // Проверка антидребезга
         if (now - _lastPulseTime > _debounceMs) { // Эта проверка не атомарна, но для антидребезга это допустимо
             portENTER_CRITICAL_ISR(&_spinlock);
-            _liters++;
+            _liters = _liters + 1;
             _lastPulseTime = now;
             portEXIT_CRITICAL_ISR(&_spinlock);
             _pulseDetected = true;
