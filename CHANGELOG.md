@@ -30,8 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LED helper header now has local fallback defaults for LED-related build flags.
 - PlatformIO board overrides no longer redefine shared RS485 and ADC build flags.
 - GitHub Actions workflow no longer creates releases from ordinary pushes or pull requests.
+- Tag releases now require a matching `CHANGELOG.md` section and use it as the GitHub release body.
+- Committed `include/version.h` is now a local development fallback; CI overwrites it from the git tag or latest tag.
 
-## [1.0.0] - 2026-02-09
+## [0.0.5] - 2026-02-09
 
 ### Added
 - Initial production release

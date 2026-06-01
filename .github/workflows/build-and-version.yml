@@ -1,23 +1,108 @@
-name: IoT Firmware Build & Auto-Release
+name: Firmware CI
 
 on:
   push:
-    branches: [ main ]
-    tags:
-      - 'v*.*.*'
+    branches: [main]
+    tags: ['v*.*.*']
   pull_request:
-    branches: [ main ]
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
-    if: "!contains(github.event.head_commit.message, 'chore(release):')"
+  metadata:
+    name: Version metadata
     runs-on: ubuntu-latest
-    
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      base_version: ${{ steps.version.outputs.base_version }}
+      major: ${{ steps.version.outputs.major }}
+      minor: ${{ steps.version.outputs.minor }}
+      patch: ${{ steps.version.outputs.patch }}
+      git_sha: ${{ steps.version.outputs.git_sha }}
+      build_timestamp: ${{ steps.version.outputs.build_timestamp }}
+      build_date: ${{ steps.version.outputs.build_date }}
+      changelog_section: ${{ steps.version.outputs.changelog_section }}
+
     steps:
-      - name: Checkout code
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version and validate changelog
+        id: version
+        run: |
+          set -euo pipefail
+
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          BUILD_TS="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          BUILD_DATE="$(date -u +'%Y-%m-%d %H:%M:%SZ')"
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "Invalid release tag: ${GITHUB_REF_NAME}. Expected vX.Y.Z or vX.Y.Z-prerelease" >&2
+              exit 1
+            fi
+            VERSION="${GITHUB_REF_NAME#v}"
+            CHANGELOG_SECTION="${VERSION}"
+          else
+            LATEST_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo 'v0.0.0')"
+            VERSION="${LATEST_TAG#v}-dev.${SHORT_SHA}"
+            CHANGELOG_SECTION="Unreleased"
+          fi
+
+          BASE_VERSION="${VERSION%%-*}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${BASE_VERSION}"
+
+          if [[ -z "${MAJOR:-}" || -z "${MINOR:-}" || -z "${PATCH:-}" ]]; then
+            echo "Invalid resolved version: ${VERSION}" >&2
+            exit 1
+          fi
+
+          if [[ "${CHANGELOG_SECTION}" == "Unreleased" ]]; then
+            grep -Eq '^## \[Unreleased\]' CHANGELOG.md
+          else
+            if ! awk -v section="## [${CHANGELOG_SECTION}]" '
+              $0 == section || index($0, section " - ") == 1 { found=1 }
+              END { exit(found ? 0 : 1) }
+            ' CHANGELOG.md; then
+              echo "CHANGELOG.md must contain a section for tag ${GITHUB_REF_NAME}: ## [${CHANGELOG_SECTION}] - YYYY-MM-DD" >&2
+              exit 1
+            fi
+          fi
+
+          {
+            echo "version=${VERSION}"
+            echo "base_version=${BASE_VERSION}"
+            echo "major=${MAJOR}"
+            echo "minor=${MINOR}"
+            echo "patch=${PATCH}"
+            echo "git_sha=${SHORT_SHA}"
+            echo "build_timestamp=${BUILD_TS}"
+            echo "build_date=${BUILD_DATE}"
+            echo "changelog_section=${CHANGELOG_SECTION}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.environment }}
+    needs: metadata
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        environment:
+          - nano-c6-prod
+          - nano-c6-test
+          - xiao-c6-prod
+          - xiao-c6-test
+
+    steps:
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -26,88 +111,133 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+          cache: pip
 
-      - name: Extract Version Info
-        id: versioning
-        run: |
-          git fetch --tags
-          # Получаем последний тег или v0.0.0
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          CLEAN_TAG=${LATEST_TAG#v}
-          
-          # Разбиваем версию на компоненты
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CLEAN_TAG"
-          
-          # Логика: если это пуш в main, инкрементируем PATCH для новой сборки
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            PATCH=$((PATCH + 1))
-            NEW_TAG="v$MAJOR.$MINOR.$PATCH"
-          else
-            # Если мы на теге или PR, используем текущий контекст
-            NEW_TAG=${{ github.ref_name }}
-          fi
-          
-          echo "MAJOR=$MAJOR" >> $GITHUB_ENV
-          echo "MINOR=$MINOR" >> $GITHUB_ENV
-          echo "PATCH=$PATCH" >> $GITHUB_ENV
-          echo "TAG_NAME=$NEW_TAG" >> $GITHUB_ENV
-          echo "GIT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini', 'requirements.txt') }}
+          restore-keys: |
+            pio-${{ runner.os }}-
 
-      - name: Generate version.h
+      - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate version header
+        run: |
+          set -euo pipefail
+
           mkdir -p include
-          # Генерируем файл. Он будет перезаписан, даже если существовал.
-          cat <<EOF > include/version.h
+          cat > include/version.h <<EOF
           // Generated by GitHub Actions. DO NOT EDIT.
           #ifndef INCLUDE_VERSION_H_
           #define INCLUDE_VERSION_H_
+
           #include <string_view>
+
           namespace firmware::version {
-          inline constexpr std::string_view kFirmwareVersion = "${{ env.TAG_NAME }}";
-          inline constexpr std::string_view kGitSha = "${{ env.GIT_SHA }}";
-          inline constexpr std::string_view kBuildTimestamp = "$(date -u +'%Y-%m-%dT%H:%M:%SZ')";
-          inline constexpr int kMajor = ${{ env.MAJOR }};
-          inline constexpr int kMinor = ${{ env.MINOR }};
-          inline constexpr int kPatch = ${{ env.PATCH }};
-          }
-          #endif
+
+          inline constexpr std::string_view kFirmwareVersion = "${{ needs.metadata.outputs.version }}";
+          inline constexpr std::string_view kGitSha = "${{ needs.metadata.outputs.git_sha }}";
+          inline constexpr std::string_view kBuildTimestamp = "${{ needs.metadata.outputs.build_timestamp }}";
+          inline constexpr int kMajor = ${{ needs.metadata.outputs.major }};
+          inline constexpr int kMinor = ${{ needs.metadata.outputs.minor }};
+          inline constexpr int kPatch = ${{ needs.metadata.outputs.patch }};
+
+          }  // namespace firmware::version
+
+          #endif  // INCLUDE_VERSION_H_
           EOF
 
-      - name: Install PlatformIO & Build Tools
+      - name: Check Zigbee2MQTT converter syntax
+        run: node --check water_meter_converter.js
+
+      - name: Build firmware
+        run: pio run -e ${{ matrix.environment }}
+
+      - name: Collect firmware artifact
         run: |
-          python -m pip install --upgrade pip
-          pip install platformio cython setuptools wheel pyyaml littlefs-python
+          mkdir -p dist
+          cp ".pio/build/${{ matrix.environment }}/firmware.bin" "dist/zigbee_water_meter_${{ matrix.environment }}.bin"
+          cp ".pio/build/${{ matrix.environment }}/firmware.elf" "dist/zigbee_water_meter_${{ matrix.environment }}.elf"
 
-      - name: Custom pyfatfs build
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.environment }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: [metadata, build]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: firmware-*
+          path: release_dist
+          merge-multiple: true
+
+      - name: Prepare release notes
         run: |
-          cd /tmp && git clone https://github.com/Jason2866/pyfatfs && cd pyfatfs
-          python -m cython fatfs/wrapper.pyx
-          pip install .
-          cd ${{ github.workspace }}
+          set -euo pipefail
 
-      - name: Build Firmware
-        run: pio run
+          VERSION="${{ needs.metadata.outputs.changelog_section }}"
 
-      - name: Rename Artifact
-        run: |
-          # Копируем бинарник с красивым именем для релиза
-          mkdir -p release_dist
-          find .pio/build -name "firmware.bin" -exec cp {} release_dist/zigbee_water_meter_${{ env.TAG_NAME }}.bin \;
+          awk -v version="$VERSION" '
+            $0 == "## [" version "]" || index($0, "## [" version "] - ") == 1 { capture=1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md > release_notes.md
 
-      - name: Create GitHub Release and Attach Asset
+          if [[ ! -s release_notes.md ]]; then
+            echo "No changelog content found for ${VERSION}" >&2
+            exit 1
+          fi
+
+          cat > release_body.md <<EOF
+          ## Автоматическая сборка прошивки
+
+          - **Версия:** ${{ github.ref_name }}
+          - **Commit:** ${{ needs.metadata.outputs.git_sha }}
+          - **Дата:** ${{ needs.metadata.outputs.build_date }}
+
+          ## Changelog
+          EOF
+
+          cat release_notes.md >> release_body.md
+
+          cat >> release_body.md <<EOF
+
+          ## Артефакты
+          - \`zigbee_water_meter_nano-c6-prod.bin\`
+          - \`zigbee_water_meter_nano-c6-test.bin\`
+          - \`zigbee_water_meter_xiao-c6-prod.bin\`
+          - \`zigbee_water_meter_xiao-c6-test.bin\`
+          EOF
+
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.TAG_NAME }}
-          name: Release ${{ env.TAG_NAME }}
-          files: release_dist/*.bin
-          body: |
-            ## Автоматическая сборка прошивки
-            - **Версия:** ${{ env.TAG_NAME }}
-            - **Commit:** ${{ env.GIT_SHA }}
-            - **Дата:** $(date -u +'%Y-%m-%d %H:%M:%SZ')
-          generate_release_notes: true
+          name: Release ${{ github.ref_name }}
+          files: release_dist/*
+          body_path: release_body.md
+          generate_release_notes: false
           draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}

@@ -1,6 +1,6 @@
 # ESP32-C6 Zigbee Water Meter
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Version](https://img.shields.io/badge/version-git--tag-blue)
 ![Platform](https://img.shields.io/badge/platform-ESP32--C6-green)
 ![License](https://img.shields.io/badge/license-Copyright%202026-red)
 
@@ -138,6 +138,7 @@ The GitHub Actions workflow in `.github/workflows/build-and-version.yml` perform
 - firmware build for all four PlatformIO environments
 - firmware artifact upload for every CI run
 - GitHub Release creation only when pushing a tag such as `v1.2.3`
+- release tags require a matching `CHANGELOG.md` section such as `## [1.2.3] - 2026-06-01`
 
 Release assets are named by environment, for example `zigbee_water_meter_xiao-c6-prod.bin`.
 
