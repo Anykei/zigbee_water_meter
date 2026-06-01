@@ -6,6 +6,10 @@
 
 A professional, dual-channel Zigbee water meter firmware for ESP32-C6. Designed to interface with both smart RS485 meters (Modbus) and traditional pulse-output meters.
 
+## Build Status
+
+GitHub Actions builds all PlatformIO environments on every pull request and every push to `main`. A GitHub Release with firmware binaries is created only for version tags matching `vX.Y.Z`.
+
 ## Screenshots
 
 ### Zigbee2MQTT Integration
@@ -26,7 +30,7 @@ A professional, dual-channel Zigbee water meter firmware for ESP32-C6. Designed 
     *   **Power efficient:** ~21 mA average consumption with 5-minute polling intervals.
     *   Reports Total Volume (m³) and Hourly Consumption.
     *   Configurable via Zigbee (Offset, Serial Number).
-    *   Battery status reporting every 30 minutes.
+    *   Battery status reporting every 6 hours in production builds.
     *   Periodic heartbeat reports (30-minute intervals).
 *   **Data Safety:**
     *   Auto-saves readings to NVS (Non-Volatile Storage) to survive power loss.
@@ -41,7 +45,7 @@ A professional, dual-channel Zigbee water meter firmware for ESP32-C6. Designed 
 
 ## Hardware
 
-*   **Microcontroller:** ESP32-C6 (e.g., SuperMini C6).
+*   **Microcontroller:** ESP32-C6 (NanoESP32-C6 compatible board or Seeed XIAO ESP32C6).
 *   **Communication:** RS485 Transceiver (MAX485/MAX3485) for Smart mode.
 *   **Power Supply:** 5V USB or external DC with RS485 power control (GPIO 18).
 *   **Sensors:** Pulse meters or RS485 Modbus meters.
@@ -58,45 +62,84 @@ A professional, dual-channel Zigbee water meter firmware for ESP32-C6. Designed 
 | **RS485 EN** | 19 | DE/RE direction control |
 | **Pulse Cold** | 10 | Interrupt input (FALLING edge) |
 | **Pulse Hot** | 11 | Interrupt input (FALLING edge) |
+| **Battery ADC** | board-specific | Input voltage measurement via divider |
+| **Battery ADC Enable** | optional | Powers the measurement divider when configured |
+
+### Battery Measurement
+
+System battery reporting uses a separate Zigbee Power Config endpoint. The ADC path supports:
+
+- optional divider enable pin: `ADC_BATTERY_ENABLE_PIN` (`-1` disables it)
+- enable polarity: `ADC_BATTERY_ENABLE_ACTIVE_LOW`
+- divider settle time: `ADC_BATTERY_POWER_SETTLE_MS`
+- averaged ADC reads: `ADC_BATTERY_SAMPLES` and `ADC_BATTERY_SAMPLE_DELAY_MS`
+- placeholder calibration: `ADC_BATTERY_VOLTAGE_SCALE` and `ADC_BATTERY_VOLTAGE_OFFSET_MV`
+- placeholder battery curve points: `ADC_BATTERY_CURVE_*_MV`
+
+The default values are intentionally fake and should be replaced after measuring the real divider with a multimeter.
 
 ## Power Consumption
 
-| Mode | Current | Duration (per 5 min cycle) |
-| :--- | :--- | :--- |
-| Active (RS485 polling) | ~150 mA | ~2 seconds |
-| Light Sleep | ~20 mA | ~298 seconds |
-| **Average** | **~21 mA** | - |
+Power numbers are hardware-dependent and should be re-measured after the final RS485 module, battery divider, and regulator are selected.
 
-**Battery Life Estimates:**
-- 3000 mAh: ~6 days continuous operation
-- 5000 mAh: ~10 days continuous operation
+| Mode | Current | Notes |
+| :--- | :--- | :--- |
+| Active (RS485 polling) | TBD | RS485 converter and meter-dependent |
+| Zigbee interview/configuration window | TBD | Device stays awake after join |
+| Light/deep sleep | TBD | Depends on board regulator and external pull-ups |
+| Battery measurement | TBD | Optional divider enable pin can reduce standby drain |
+
+The firmware supports a switched battery divider via `ADC_BATTERY_ENABLE_PIN`, averaged ADC reads, and 6-hour production battery reporting.
 
 ## Installation
 
-1.  **Environment:** PlatformIO or Arduino IDE with ESP32 Arduino Core (v3.0+).
-2.  **Board Settings:**
-    *   **Board:** ESP32-C6 (e.g., `esp32-c6-devkitc-1`).
-    *   **Zigbee Mode:** End Device ⚠️ **CRITICAL** - Must select "End Device" mode in Tools menu.
-    *   **Partition Scheme:** Zigbee 8MB with SPIFFS.
-    *   **Upload Speed:** 921600.
-3.  **Configuration:**
-    Open `main/main.ino` and adjust the configuration section:
-    ```cpp
-    /* PRODUCT CONFIGURATION */
-    constexpr uint32_t HEARTBEAT_INTERVAL = 60000 * 30;         // 30 min
-    constexpr uint32_t BATTERY_REPORT_INTERVAL = 60000 * 30;   // 30 min
-    constexpr uint32_t COLD_POOL_INTERVAL = 60000 * 5;         // 5 min polling
-    constexpr uint32_t HOT_POOL_INTERVAL  = 60000 * 5;         // 5 min polling
-    constexpr uint32_t DEEP_SLEEP_THRESHOLD = 60;              // 60s idle before deep sleep
-    constexpr uint32_t LOOP_IDLE_DELAY = 5000;                 // 5s loop delay
-    
-    constexpr Source::SourceType COLD_TYPE = Source::SourceType::Smart; // or Pulse, Test
-    constexpr Source::SourceType HOT_TYPE = Source::SourceType::Smart;
-    
-    constexpr Driver::MeterModel COLD_DRV_MODEL = Driver::MeterModel::Pulsar_Du_15_20;
-    constexpr Driver::MeterModel HOT_DRV_MODEL = Driver::MeterModel::Pulsar_Du_15_20;
+1.  **Install PlatformIO:**
+
+    ```bash
+    python -m pip install -r requirements.txt
     ```
-4.  **Flash:** Upload the firmware to your board.
+
+2.  **Choose an environment:**
+
+    | Environment | Board | Purpose |
+    | :--- | :--- | :--- |
+    | `nano-c6-prod` | ESP32-C6 DevKit compatible / NanoESP32-C6 | Production firmware |
+    | `nano-c6-test` | ESP32-C6 DevKit compatible / NanoESP32-C6 | Fast test intervals and simulated sources |
+    | `xiao-c6-prod` | Seeed XIAO ESP32C6 | Production firmware |
+    | `xiao-c6-test` | Seeed XIAO ESP32C6 | Fast test intervals and simulated sources |
+
+3.  **Build:**
+
+    ```bash
+    pio run -e nano-c6-prod
+    ```
+
+4.  **Flash:**
+
+    ```bash
+    pio run -e nano-c6-prod -t upload
+    ```
+
+5.  **Monitor serial output:**
+
+    ```bash
+    pio device monitor -b 115200
+    ```
+
+Hardware pins, ADC calibration placeholders, and board-specific overrides live in `platformio.ini`. Application timing and source mode defaults are in `main/main.cpp`.
+
+## CI/CD
+
+The GitHub Actions workflow in `.github/workflows/build-and-version.yml` performs:
+
+- Python and PlatformIO setup
+- generated `include/version.h` for the current build
+- syntax check for `water_meter_converter.js`
+- firmware build for all four PlatformIO environments
+- firmware artifact upload for every CI run
+- GitHub Release creation only when pushing a tag such as `v1.2.3`
+
+Release assets are named by environment, for example `zigbee_water_meter_xiao-c6-prod.bin`.
 
 ## Architecture
 
@@ -163,7 +206,7 @@ external_converters:
 - **Heartbeat:** Every 30 minutes (both channels report total volume)
 - **On-change:** Instant report when value changes
 - **Hourly stats:** Automatically reported when hour changes
-- **Battery:** Every 30 minutes
+- **Battery:** Every 6 hours in production builds; every 60 seconds in test builds
 - **Initial config:** 5 seconds after connection (Serial Number + Offset)
 
 ## Usage
