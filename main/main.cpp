@@ -23,6 +23,7 @@
 // Abstraction Layers
 #include "utils.h"
 #include "zigbee_water_meter.h"
+#include "zigbee_device_power.h"
 #include "hwi_streams/rs485_stream.h"
 #include "drivers/driver_factory.h"
 #include "sources/factory_source.h"
@@ -70,6 +71,58 @@
 #define PULSE_HOT_PIN    11
 #endif
 
+#ifndef ADC_BATTERY_VOLTAGE_PIN
+#define ADC_BATTERY_VOLTAGE_PIN 1
+#endif
+#ifndef ADC_BATTERY_VOLTAGE_HI
+#define ADC_BATTERY_VOLTAGE_HI 3.3
+#endif
+#ifndef ADC_BATTERY_VOLTAGE_LO
+#define ADC_BATTERY_VOLTAGE_LO 2.0
+#endif
+#ifndef ADC_BATTERY_VOLTAGE_SCALE
+#define ADC_BATTERY_VOLTAGE_SCALE 2.0
+#endif
+#ifndef ADC_BATTERY_VOLTAGE_OFFSET_MV
+#define ADC_BATTERY_VOLTAGE_OFFSET_MV 0
+#endif
+#ifndef ADC_BATTERY_ENABLE_PIN
+#define ADC_BATTERY_ENABLE_PIN -1
+#endif
+#ifndef ADC_BATTERY_ENABLE_ACTIVE_LOW
+#define ADC_BATTERY_ENABLE_ACTIVE_LOW 0
+#endif
+#ifndef ADC_BATTERY_POWER_SETTLE_MS
+#define ADC_BATTERY_POWER_SETTLE_MS 20
+#endif
+#ifndef ADC_BATTERY_SAMPLES
+#define ADC_BATTERY_SAMPLES 12
+#endif
+#ifndef ADC_BATTERY_SAMPLE_DELAY_MS
+#define ADC_BATTERY_SAMPLE_DELAY_MS 2
+#endif
+#ifndef ADC_BATTERY_CURVE_EMPTY_MV
+#define ADC_BATTERY_CURVE_EMPTY_MV 2000
+#endif
+#ifndef ADC_BATTERY_CURVE_LOW_MV
+#define ADC_BATTERY_CURVE_LOW_MV 2350
+#endif
+#ifndef ADC_BATTERY_CURVE_MID_MV
+#define ADC_BATTERY_CURVE_MID_MV 2700
+#endif
+#ifndef ADC_BATTERY_CURVE_HIGH_MV
+#define ADC_BATTERY_CURVE_HIGH_MV 3050
+#endif
+#ifndef ADC_BATTERY_CURVE_FULL_MV
+#define ADC_BATTERY_CURVE_FULL_MV 3300
+#endif
+#ifndef LOW_BATTERY_CRITICAL_PERCENT
+#define LOW_BATTERY_CRITICAL_PERCENT 5
+#endif
+#ifndef RS485_POWER_SETTLE_MS
+#define RS485_POWER_SETTLE_MS 100
+#endif
+
 /* --- ZIGBEE CONFIGURATION (from build_flags, with safe defaults) --- */
 #ifndef MODEL_ID
 #define MODEL_ID "C6_WATER_METER"
@@ -99,7 +152,7 @@ constexpr uint32_t LOOP_IDLE_DELAY = 100; // Main loop idle delay for test mode 
 
 #else
 constexpr uint32_t HEARTBEAT_INTERVAL = 60000 * 30; // Heartbeat interval for HA (ms)
-constexpr uint32_t BATTERY_REPORT_INTERVAL = 60000 * 30; // Interval for reporting battery status (ms)
+constexpr uint32_t BATTERY_REPORT_INTERVAL = 60000 * 60 * 6; // Interval for reporting battery status (ms)
 constexpr uint32_t COLD_POOL_INTERVAL = 60000 * 30; // Polling interval for cold channel (ms)
 constexpr uint32_t HOT_POOL_INTERVAL  = 60000 * 30; // Polling interval for hot channel (ms)
 constexpr uint32_t DEEP_SLEEP_THRESHOLD = 60; // Time in seconds before entering deep sleep when idle
@@ -114,35 +167,16 @@ constexpr Driver::MeterModel COLD_DRV_MODEL = Driver::MeterModel::Pulsar_Du_15_2
 constexpr Driver::MeterModel HOT_DRV_MODEL = Driver::MeterModel::Pulsar_Du_15_20;
 
 constexpr bool NEED_RS485 = (COLD_TYPE == Source::SourceType::Smart || HOT_TYPE == Source::SourceType::Smart);
-constexpr bool HAS_RGB_STATUS_LED  = (RGB_LED_PIN >= 0);
-constexpr bool HAS_GPIO_STATUS_LED = (GPIO_STATUS_LED_PIN >= 0);
 
 static uint32_t g_join_time_ms = 0;
 static bool g_sleep_enabled_runtime = false;
 
-inline void StatusLedRaw(bool on) {
-    if constexpr (HAS_GPIO_STATUS_LED) {
-        const bool level = GPIO_STATUS_LED_ACTIVE_LOW ? !on : on;
-        digitalWrite(GPIO_STATUS_LED_PIN, level ? HIGH : LOW);
-    }
-}
-
 inline void StatusLedSet(uint8_t r, uint8_t g, uint8_t b) {
-    if constexpr (HAS_RGB_STATUS_LED) {
-        Utils::setLed(r, g, b);
-    } else if constexpr (HAS_GPIO_STATUS_LED) {
-        StatusLedRaw((r > 0) || (g > 0) || (b > 0));
-    }
+    Utils::setLed(r, g, b);
 }
 
 inline void StatusLedFlash(uint8_t r, uint8_t g, uint8_t b, uint32_t ms) {
-    if constexpr (HAS_RGB_STATUS_LED) {
-        Utils::flashLed(r, g, b, ms);
-    } else if constexpr (HAS_GPIO_STATUS_LED) {
-        StatusLedSet(r, g, b);
-        delay(ms);
-        StatusLedSet(0, 0, 0);
-    }
+    Utils::flashLed(r, g, b, ms);
 }
 
 /* --- GLOBAL OBJECTS --- */
@@ -152,6 +186,26 @@ std::unique_ptr<RS485Stream> rs485Bus = nullptr;
 // Zigbee Endpoints
 ZigbeeWaterMeter zigbeeCold(1, true); 
 ZigbeeWaterMeter zigbeeHot(2, false);
+// Endpoint 3: System Power (ESP32 Battery)
+ZigbeeDevicePower zigbeePower(
+    3,
+    ADC_BATTERY_VOLTAGE_PIN,
+    ADC_BATTERY_VOLTAGE_LO,
+    ADC_BATTERY_VOLTAGE_HI,
+    ADC_BATTERY_VOLTAGE_SCALE,
+    ADC_BATTERY_VOLTAGE_OFFSET_MV,
+    ADC_BATTERY_ENABLE_PIN,
+    ADC_BATTERY_ENABLE_ACTIVE_LOW,
+    ADC_BATTERY_POWER_SETTLE_MS,
+    ADC_BATTERY_SAMPLES,
+    ADC_BATTERY_SAMPLE_DELAY_MS,
+    ADC_BATTERY_CURVE_EMPTY_MV,
+    ADC_BATTERY_CURVE_LOW_MV,
+    ADC_BATTERY_CURVE_MID_MV,
+    ADC_BATTERY_CURVE_HIGH_MV,
+    ADC_BATTERY_CURVE_FULL_MV
+);
+
 
 // Interfaces (Pointers)
 std::unique_ptr<Driver::SmartMeterDriver> coldDrv = nullptr;
@@ -168,12 +222,12 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
     // Handle attribute write commands from coordinator
     if (callback_id == ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID) {
         auto *msg = (esp_zb_zcl_set_attr_value_message_t *)message;
-        StatusLedSet(0, 30, 30);
-        for (auto ep : Zigbee.ep_objects) {
-            if (msg->info.dst_endpoint == ep->getEndpoint()) {
-                static_cast<ZigbeeWaterMeter*>(ep)->handleAttributeWrite(msg);
-                break;
-            }
+        if (msg->info.dst_endpoint == zigbeeCold.getEndpoint()) {
+            StatusLedSet(0, 30, 30);
+            zigbeeCold.handleAttributeWrite(msg);
+        } else if (msg->info.dst_endpoint == zigbeeHot.getEndpoint()) {
+            StatusLedSet(0, 30, 30);
+            zigbeeHot.handleAttributeWrite(msg);
         }
         return ESP_OK;
     }
@@ -212,7 +266,10 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         case ESP_ZB_BDB_SIGNAL_STEERING:
             if (sig_status == ESP_OK) {
                 Serial.println("Zigbee: Connected successfully. Enabling RS485 power.");
-                if constexpr (NEED_RS485) digitalWrite(RS485_POWER_PIN, HIGH);
+                if constexpr (NEED_RS485) {
+                    digitalWrite(RS485_POWER_PIN, HIGH);
+                    delay(RS485_POWER_SETTLE_MS);
+                }
                 g_join_time_ms = millis();
                 g_sleep_enabled_runtime = false;
                 esp_zb_sleep_enable(false);
@@ -224,7 +281,10 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
 
         case ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP:
             Serial.println("Zigbee: Device already commissioned, skipping pairing.");
-            if constexpr (NEED_RS485) digitalWrite(RS485_POWER_PIN, HIGH);
+            if constexpr (NEED_RS485) {
+                digitalWrite(RS485_POWER_PIN, HIGH);
+                delay(RS485_POWER_SETTLE_MS);
+            }
             g_join_time_ms = millis();
             g_sleep_enabled_runtime = false;
             esp_zb_sleep_enable(false);
@@ -357,16 +417,13 @@ void setup() {
 
 void initHardware() {
     Serial.begin(115200);
-    if constexpr (HAS_GPIO_STATUS_LED) {
-        pinMode(GPIO_STATUS_LED_PIN, OUTPUT);
-        StatusLedRaw(false);
-    }
     StatusLedSet(30, 0, 0); // Статус: Загрузка
 
     // Шина данных
     if constexpr (NEED_RS485) {
         pinMode(RS485_POWER_PIN, OUTPUT);
         digitalWrite(RS485_POWER_PIN, HIGH); // Включаем питание шины
+        delay(RS485_POWER_SETTLE_MS);
 
         rs485Bus = std::make_unique<RS485Stream>(&Serial1, RS485_EN);
         rs485Bus->begin(RS485_BAUD, RS485_CONFIG, RS485_RX, RS485_TX);
@@ -448,8 +505,11 @@ void setupZigbee() {
     // Register endpoints in the stack
     zigbeeCold.begin(); 
     zigbeeHot.begin();
+    zigbeePower.begin();
+
     Zigbee.addEndpoint(&zigbeeCold); 
     Zigbee.addEndpoint(&zigbeeHot);
+    Zigbee.addEndpoint(&zigbeePower);
 
     // Идентификация устройства
     zigbeeCold.setManufacturerAndModel(MANUFACTURER_NAME, MODEL_ID);
@@ -639,6 +699,14 @@ void handleZigbeeReporting() {
         last_battery = now;
         if (zigbeeCold.battery_supported()) zigbeeCold.reportBattery();
         if (zigbeeHot.battery_supported())  zigbeeHot.reportBattery();
+        uint8_t systemBatteryPercent = zigbeePower.reportStatus(); // Report ESP battery status
+        if (systemBatteryPercent <= LOW_BATTERY_CRITICAL_PERCENT) {
+            Serial.printf(
+                "System Power: CRITICAL battery level (%u%%, %lu mV). Consider reducing polling or replacing battery.\n",
+                systemBatteryPercent,
+                (unsigned long)zigbeePower.lastCalibratedMilliVolts()
+            );
+        }
     }
 }
 

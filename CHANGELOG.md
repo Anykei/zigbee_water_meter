@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- System power Zigbee endpoint with Power Config reporting.
+- ADC battery measurement path with fake calibration placeholders.
+- Optional ADC divider enable pin support.
+- Averaged ADC sampling for battery voltage.
+- Configurable battery percentage curve points.
+- Low-battery diagnostic logging.
+- Board-specific PlatformIO environments for NanoESP32-C6 and Seeed XIAO ESP32C6.
+- GitHub Actions CI builds for all PlatformIO environments.
+- Release workflow for tagged firmware builds (`vX.Y.Z`).
+
+### Changed
+- Production system battery reporting interval changed from 30 minutes to 6 hours.
+- RS485 power-up now includes a configurable settle delay.
+- Status LED helper now uses `rgbLedWrite()` instead of deprecated `neopixelWrite()`.
+- XIAO test environment now extends the XIAO production environment.
+- README updated to match the current PlatformIO-based project layout and CI/CD flow.
+
+### Fixed
+- Zigbee write callbacks now route only to water meter endpoints and no longer cast the system power endpoint to `ZigbeeWaterMeter`.
+- LED helper header now has local fallback defaults for LED-related build flags.
+- PlatformIO board overrides no longer redefine shared RS485 and ADC build flags.
+- GitHub Actions workflow no longer creates releases from ordinary pushes or pull requests.
+
 ## [1.0.0] - 2026-02-09
 
 ### Added
@@ -53,9 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pulse counter inputs with interrupt support
 - Configurable RS485 power control
 
-## [Unreleased]
-
-### Planned
+## Planned
 - Additional meter driver support (beyond Pulsar)
 - OTA firmware update support
 - Extended battery optimization modes
