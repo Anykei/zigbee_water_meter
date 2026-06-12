@@ -8,6 +8,7 @@ namespace Driver {
 enum class MeterParam {
     TotalVolume,           // Accumulated volume (liters/m3)
     BatteryVoltage,        // Current voltage (Volts)
+    FlowRate,              // Current flow rate (m3/h)
     
     BatteryThresholdMin,   // Deep discharge threshold (shutdown)
     BatteryThresholdAlarm, // Warning threshold (system alert)
@@ -17,35 +18,32 @@ enum class MeterParam {
     FlowRateMax            // Maximum allowable flow rate
 };
 
-// Interface for physical meter drivers (Modbus/RS485).
+// Interface for meter protocols that can expose numeric readings over a
+// transport such as RS485.
 class SmartMeterDriver {
 public:
     virtual ~SmartMeterDriver() {}
 
     void setTransport(Stream* transport) { _transport = transport; }
 
-    // Sets the port for TX/RX packet logging (any Serial).
     void setLogger(Print* logger) { log_serial = logger; }
 
-    // Sets the device address on the bus.
     virtual void setAddress(uint32_t address) {
          _address = address;
     }
 
-    // Returns a list of parameters that this specific driver can read.
     virtual std::vector<MeterParam> getSupportedParams() const = 0;
 
-    // Main method for retrieving data.
     virtual bool getValue(MeterParam param, float &result) = 0;
 
 protected:
-    Stream* _transport = nullptr; // Abstract transport (can be RS485, Modbus, etc.)
+    Stream* _transport = nullptr;
     Print* log_serial = nullptr;
     uint32_t _address = 0;
     
     SmartMeterDriver(Stream* transport) : _transport(transport) {}
 };
 
-} 
+}  // namespace Driver
 
-#endif
+#endif  // SMART_DRIVER_H

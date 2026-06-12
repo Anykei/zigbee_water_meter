@@ -1,6 +1,6 @@
 # ESP32-C6 Zigbee Water Meter
 
-![Version](https://img.shields.io/badge/version-git--tag-blue)
+![Version](https://img.shields.io/badge/version-0.1.0--dev-blue)
 ![Platform](https://img.shields.io/badge/platform-ESP32--C6-green)
 ![License](https://img.shields.io/badge/license-Copyright%202026-red)
 
@@ -8,7 +8,7 @@ A professional, dual-channel Zigbee water meter firmware for ESP32-C6. Designed 
 
 ## Build Status
 
-GitHub Actions builds all PlatformIO environments on every pull request and every push to `main`. A GitHub Release with firmware binaries is created only for version tags matching `vX.Y.Z`.
+GitHub Actions builds the supported PlatformIO environments on every pull request and every push to `main`. A GitHub Release with firmware binaries is created only for a tag that matches the version declared in `VERSION`.
 
 ## Screenshots
 
@@ -132,15 +132,25 @@ Hardware pins, ADC calibration placeholders, and board-specific overrides live i
 
 The GitHub Actions workflow in `.github/workflows/build-and-version.yml` performs:
 
+- version resolution from `VERSION`
 - Python and PlatformIO setup
-- generated `include/version.h` for the current build
-- syntax check for `water_meter_converter.js`
-- firmware build for all four PlatformIO environments
+- generated `include/version.h` for the current build through `scripts/generate_version.py`
+- syntax check for `water_meter_converter_en.js` and `water_meter_converter_ru.js`
+- firmware build for the supported PlatformIO environments
 - firmware artifact upload for every CI run
-- GitHub Release creation only when pushing a tag such as `v1.2.3`
-- release tags require a matching `CHANGELOG.md` section such as `## [1.2.3] - 2026-06-01`
+- Zigbee2MQTT converter artifact upload for every CI run
+- GitHub Release creation only when pushing the matching tag, for example `v0.1.0` when `VERSION` contains `0.1.0`
+- release tags require a matching `CHANGELOG.md` section such as `## [0.1.0] - 2026-06-01`
 
-Release assets are named by environment, for example `zigbee_water_meter_xiao-c6-prod.bin`.
+Branch builds use a development firmware version such as `0.1.0-dev+abc1234`. Release assets are named by environment, for example `zigbee_water_meter_xiao-c6-prod.bin`.
+
+Release checklist:
+
+1. Run `python scripts/release.py --version 0.1.0`.
+2. Review `VERSION`, `CHANGELOG.md`, and `include/version.h`.
+3. Run `python scripts/release.py --commit --tag --push`.
+
+The workflow rejects release tags that do not match `VERSION` or do not have a matching changelog section.
 
 ## Architecture
 
@@ -185,19 +195,28 @@ Release assets are named by environment, for example `zigbee_water_meter_xiao-c6
 
 ### Zigbee2MQTT
 A custom converter is required to expose all features (Offsets, Serial Numbers, Hourly stats).
-Copy `water_meter_converter.js` to your Zigbee2MQTT configuration folder and add it to `configuration.yaml`:
+Copy one converter to your Zigbee2MQTT configuration folder:
+
+- `water_meter_converter_en.js` - English labels.
+- `water_meter_converter_ru.js` - Russian labels.
+
+Enable only one of them because both describe the same Zigbee model. Add the selected file to `configuration.yaml`:
 
 ```yaml
 external_converters:
-  - water_meter_converter.js
+  - water_meter_converter_en.js
 ```
 
 ### Attributes & Clusters
 
 | Cluster | Attribute ID | Name | Type | Access | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Metering (0x0702)** | 0x0000 | CurrentSummDelivered | u48 | R | Total Volume (m³ × 1000) |
-| **Metering** | 0x0400 | InstantaneousDemand | u32 | R | Last Hour Consumption (Liters) |
+| **Metering (0x0702)** | 0x0000 | CurrentSummDelivered | u48 | R | Total volume (m3 x 1000) |
+| **Metering** | 0x0400 | InstantaneousDemand | u32 | R | Current flow rate (m3/h x 1000) |
+| **Metering** | 0xE000 | HourlyConsumption | u32 | R | Last closed hour consumption (m3 x 1000) |
+| **Metering** | 0xE001 | RefreshRequest | u8 | W | Forces a fresh meter poll |
+| **Metering** | 0xE002 | PollIntervalMinutes | u16 | RW | Meter poll interval in minutes |
+| **Metering** | 0xE003 | MeterBatteryVoltage | u16 | R | Smart meter battery voltage in millivolts, reported only after a successful read |
 | **Metering** | 0x0100 | CurrentTier1SummDelivered | u48 | RW | Calibration Offset (Liters) |
 | **Metering** | 0x0102 | CurrentTier2SummDelivered | u48 | RW | Meter Serial Number |
 | **Power Config (0x0001)** | 0x0021 | BatteryPercentage | u8 | R | Battery level (0-200) |
@@ -206,7 +225,11 @@ external_converters:
 
 - **Heartbeat:** Every 30 minutes (both channels report total volume)
 - **On-change:** Instant report when value changes
+- **Flow rate:** Reported with regular value reports as m3/h
 - **Hourly stats:** Automatically reported when hour changes
+- **Manual refresh:** Writing `refresh` from Zigbee2MQTT forces the next poll cycle
+- **Poll interval:** Configurable per endpoint in Zigbee2MQTT, stored in NVS
+- **Smart meter battery:** Reported per endpoint only when the meter provides a valid value
 - **Battery:** Every 6 hours in production builds; every 60 seconds in test builds
 - **Initial config:** 5 seconds after connection (Serial Number + Offset)
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-12
+
 ### Added
 - System power Zigbee endpoint with Power Config reporting.
 - ADC battery measurement path with fake calibration placeholders.
@@ -17,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Board-specific PlatformIO environments for NanoESP32-C6 and Seeed XIAO ESP32C6.
 - GitHub Actions CI builds for all PlatformIO environments.
 - Release workflow for tagged firmware builds (`vX.Y.Z`).
+- `VERSION` file as the single source for the next firmware release version.
+- Version metadata generator for CI builds and local release checks.
+- Changelog release preparation mode in the version metadata generator.
+- Release helper script for preparing changelog, fallback version header, commit, tag, and push steps.
 
 ### Changed
 - Production system battery reporting interval changed from 30 minutes to 6 hours.
@@ -24,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Status LED helper now uses `rgbLedWrite()` instead of deprecated `neopixelWrite()`.
 - XIAO test environment now extends the XIAO production environment.
 - README updated to match the current PlatformIO-based project layout and CI/CD flow.
+- CI now generates firmware version metadata through `scripts/generate_version.py`.
+- CI now publishes Zigbee2MQTT converter files as release artifacts.
+- Running `scripts/generate_version.py` no longer writes `include/version.h` unless `--header` is provided.
 
 ### Fixed
 - Zigbee write callbacks now route only to water meter endpoints and no longer cast the system power endpoint to `ZigbeeWaterMeter`.
@@ -31,7 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PlatformIO board overrides no longer redefine shared RS485 and ADC build flags.
 - GitHub Actions workflow no longer creates releases from ordinary pushes or pull requests.
 - Tag releases now require a matching `CHANGELOG.md` section and use it as the GitHub release body.
-- Committed `include/version.h` is now a local development fallback; CI overwrites it from the git tag or latest tag.
+- Committed `include/version.h` is now a local development fallback; CI overwrites it from `VERSION` and Git metadata.
+- CI now checks `water_meter_converter_en.js` and `water_meter_converter_ru.js` instead of the removed legacy converter file.
+- Release notes no longer contain mojibake text and list artifacts dynamically.
 
 ## [0.0.5] - 2026-02-09
 

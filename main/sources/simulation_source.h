@@ -6,12 +6,12 @@
 
 namespace Source {
 
-// Simulates water flow for testing purposes.
+// Deterministic-enough source for exercising Zigbee reporting without meters.
 class SimulationSource : public WaterSource {
 private:
     uint64_t _liters = 0;
     uint32_t _lastUpdate = 0;
-    float _flowRate = 0.1; // Liters per second (flow simulation)
+    float _flowRate = 0.1;
 
 public:
     SimulationSource(uint64_t startValue = 0) : _liters(startValue) {}
@@ -25,14 +25,13 @@ public:
 
     void update() override {
         uint32_t now = millis();
-        // Add "consumption" every second
         if (now - _lastUpdate > 1000) {
-            // Serial.printf("SimulationSource: Adding %.2f liters. Total before: %llu L\n", _flowRate, _liters);
-            _liters += rand() % 10 + 1; // Add random liters for visibility
+            _liters += rand() % 10 + 1;
             _lastUpdate = now;
         }
+        markReadingsValid();
     }
 };
 
-}
-#endif
+}  // namespace Source
+#endif  // SIMULATION_SOURCE_H
