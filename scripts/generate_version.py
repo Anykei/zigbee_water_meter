@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Generate firmware version metadata from the VERSION file."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SEMVER_RE = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-([0-9A-Za-z](?:[0-9A-Za-z.-]*[0-9A-Za-z])?))?$"
+)
+
+
+@dataclass(frozen=True)
+class VersionMetadata:
+    version: str
+    release_version: str
+    base_version: str
+    major: int
+    minor: int
+    patch: int
+    git_sha: str
+    build_timestamp: str
+    build_date: str
+    changelog_section: str
+    is_release: bool
+
+
+def run_git(args: list[str], default: str) -> str:
+    try:
+        output = subprocess.check_output(
+            ["git", *args],
+            cwd=ROOT,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return output.strip() or default
+    except (OSError, subprocess.CalledProcessError):
+        return default
+
+
+def read_release_version(path: Path) -> tuple[str, int, int, int]:
+    version = path.read_text(encoding="utf-8").strip()
+    match = SEMVER_RE.fullmatch(version)
+    if not match:
+        raise SystemExit(
+            f"{path} must contain SemVer without build metadata, for example 1.2.3 or 1.2.3-rc.1"
+        )
+
+    major, minor, patch = (int(match.group(i)) for i in range(1, 4))
+    return version, major, minor, patch
+
+
+def make_dev_version(release_version: str, git_sha: str) -> str:
+    suffix = git_sha if git_sha != "local" else "local"
+    if "-" in release_version:
+        return f"{release_version}+dev.{suffix}"
+    return f"{release_version}-dev+{suffix}"
+
+
+def resolve_metadata(version_file: Path) -> VersionMetadata:
+    release_version, major, minor, patch = read_release_version(version_file)
+    base_version = f"{major}.{minor}.{patch}"
+    git_sha = run_git(["rev-parse", "--short", "HEAD"], "local")
+    now = datetime.now(timezone.utc)
+    ref_type = os.environ.get("GITHUB_REF_TYPE", "")
+    ref_name = os.environ.get("GITHUB_REF_NAME", "")
+    is_release = ref_type == "tag"
+
+    if is_release:
+        expected_tag = f"v{release_version}"
+        if ref_name != expected_tag:
+            raise SystemExit(
+                f"Release tag {ref_name!r} does not match VERSION ({expected_tag!r})"
+            )
+        version = release_version
+        changelog_section = release_version
+    else:
+        version = make_dev_version(release_version, git_sha)
+        changelog_section = "Unreleased"
+
+    return VersionMetadata(
+        version=version,
+        release_version=release_version,
+        base_version=base_version,
+        major=major,
+        minor=minor,
+        patch=patch,
+        git_sha=git_sha,
+        build_timestamp=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        build_date=now.strftime("%Y-%m-%d %H:%M:%SZ"),
+        changelog_section=changelog_section,
+        is_release=is_release,
+    )
+
+
+def validate_changelog(changelog: Path, section: str) -> None:
+    text = changelog.read_text(encoding="utf-8")
+
+    if section == "Unreleased":
+        if re.search(r"^## \[Unreleased\](?:\s|$)", text, re.MULTILINE):
+            return
+        raise SystemExit("CHANGELOG.md must contain ## [Unreleased]")
+
+    heading = f"## [{section}]"
+    for line in text.splitlines():
+        if line == heading or line.startswith(f"{heading} - "):
+            return
+
+    raise SystemExit(
+        f"CHANGELOG.md must contain a section for the release: {heading} - YYYY-MM-DD"
+    )
+
+
+def prepare_changelog(changelog: Path, release_version: str, release_date: str) -> None:
+    text = changelog.read_text(encoding="utf-8")
+    release_heading = f"## [{release_version}]"
+
+    if re.search(rf"^{re.escape(release_heading)}(?: - .+)?$", text, re.MULTILINE):
+        raise SystemExit(f"CHANGELOG.md already contains {release_heading}")
+
+    match = re.search(r"^## \[Unreleased\][ \t]*$", text, re.MULTILINE)
+    if not match:
+        raise SystemExit("CHANGELOG.md must contain ## [Unreleased]")
+
+    next_heading = re.search(r"^## \[", text[match.end() :], re.MULTILINE)
+    section_end = match.end() + next_heading.start() if next_heading else len(text)
+    unreleased_body = text[match.end() : section_end]
+
+    if not unreleased_body.strip():
+        raise SystemExit("CHANGELOG.md [Unreleased] section is empty")
+
+    replacement = f"## [Unreleased]\n\n## [{release_version}] - {release_date}"
+    text = text[: match.start()] + replacement + text[match.end() :]
+    changelog.write_text(text, encoding="utf-8")
+
+
+def cpp_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def write_header(path: Path, metadata: VersionMetadata) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    is_release = "true" if metadata.is_release else "false"
+    header = f"""// Generated by scripts/generate_version.py.
+// CI regenerates this file for each firmware build.
+#ifndef INCLUDE_VERSION_H_
+#define INCLUDE_VERSION_H_
+
+#include <string_view>
+
+namespace firmware::version {{
+
+inline constexpr std::string_view kFirmwareVersion = "{cpp_string(metadata.version)}";
+inline constexpr std::string_view kReleaseVersion = "{cpp_string(metadata.release_version)}";
+inline constexpr std::string_view kBaseVersion = "{cpp_string(metadata.base_version)}";
+inline constexpr std::string_view kGitSha = "{cpp_string(metadata.git_sha)}";
+inline constexpr std::string_view kBuildTimestamp = "{cpp_string(metadata.build_timestamp)}";
+inline constexpr std::string_view kBuildDate = "{cpp_string(metadata.build_date)}";
+inline constexpr int kMajor = {metadata.major};
+inline constexpr int kMinor = {metadata.minor};
+inline constexpr int kPatch = {metadata.patch};
+inline constexpr bool kIsRelease = {is_release};
+
+}}  // namespace firmware::version
+
+#endif  // INCLUDE_VERSION_H_
+"""
+    path.write_text(header, encoding="utf-8")
+
+
+def write_github_outputs(metadata: VersionMetadata) -> None:
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if not output_path:
+        return
+
+    values = {
+        "version": metadata.version,
+        "release_version": metadata.release_version,
+        "base_version": metadata.base_version,
+        "major": str(metadata.major),
+        "minor": str(metadata.minor),
+        "patch": str(metadata.patch),
+        "git_sha": metadata.git_sha,
+        "build_timestamp": metadata.build_timestamp,
+        "build_date": metadata.build_date,
+        "changelog_section": metadata.changelog_section,
+        "is_release": "true" if metadata.is_release else "false",
+    }
+
+    with Path(output_path).open("a", encoding="utf-8") as output:
+        for key, value in values.items():
+            output.write(f"{key}={value}\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version-file", type=Path, default=ROOT / "VERSION")
+    parser.add_argument("--changelog", type=Path, default=ROOT / "CHANGELOG.md")
+    parser.add_argument("--header", type=Path)
+    parser.add_argument("--no-header", action="store_true")
+    parser.add_argument("--no-changelog-check", action="store_true")
+    parser.add_argument(
+        "--prepare-changelog",
+        action="store_true",
+        help="Promote the current [Unreleased] changelog section to VERSION.",
+    )
+    parser.add_argument(
+        "--release-date",
+        default=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        help="Release date for --prepare-changelog, in YYYY-MM-DD format.",
+    )
+    args = parser.parse_args()
+
+    metadata = resolve_metadata(args.version_file)
+    if args.prepare_changelog:
+        prepare_changelog(args.changelog, metadata.release_version, args.release_date)
+
+    if not args.no_changelog_check:
+        validate_changelog(args.changelog, metadata.changelog_section)
+
+    if args.header is not None and not args.no_header:
+        write_header(args.header, metadata)
+
+    write_github_outputs(metadata)
+
+    print(f"version={metadata.version}")
+    print(f"release_version={metadata.release_version}")
+    print(f"git_sha={metadata.git_sha}")
+    print(f"build_timestamp={metadata.build_timestamp}")
+
+
+if __name__ == "__main__":
+    main()

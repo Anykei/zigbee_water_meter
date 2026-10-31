@@ -7,11 +7,13 @@
 
 namespace Driver {
 enum class MeterModel {
-    Mock,           // Симуляция
-    Pulsar_Du_15_20,      // Наш текущий Пульсар
-    Modbus_Generic  // (на будущее)
+    Mock,
+    Pulsar_Du_15_20,
+    Modbus_Generic
 };
 
+// Creates protocol drivers for smart-meter sources. Ownership is transferred
+// to the caller.
 class DriverFactory {
 public:
     static SmartMeterDriver* create(MeterModel model, Stream* transport, uint32_t address) {
@@ -20,12 +22,12 @@ public:
                 return new PulsarDu_15_20(transport, address);
             
             case MeterModel::Mock:
-                return new MockMeterDriver(); // Ему транспорт не нужен
+                return new MockMeterDriver();
 
             default:
                 return nullptr;
         }
     }
 };
-}
-#endif
+}  // namespace Driver
+#endif  // DRIVER_FACTORY_H

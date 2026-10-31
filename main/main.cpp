@@ -1,13 +1,137 @@
-/*
- * Copyright 2026 Andrey Nemenko
- *
- * Main application entry point for the ESP32-C6 Zigbee Water Meter.
- * This file handles hardware initialization, Zigbee stack configuration,
- * and the main event loop using a non-blocking architecture.
- * 
- * Version: 1.0.0
- * Release Date: 2026-02-09
- */
+// Copyright 2026 Andrey Nemenko.
+//
+// Main application entry point for the ESP32-C6 Zigbee Water Meter. This file
+// wires hardware initialization, persisted state, sources, and Zigbee reports.
+
+#ifdef RS485_UART_BRIDGE
+
+#include <Arduino.h>
+
+#ifndef RS485_RX
+#define RS485_RX 21
+#endif
+#ifndef RS485_TX
+#define RS485_TX 20
+#endif
+#ifndef RS485_EN
+#define RS485_EN -1
+#endif
+#ifndef RS485_BAUD
+#define RS485_BAUD 9600
+#endif
+#ifndef RS485_POWER_PIN
+#define RS485_POWER_PIN -1
+#endif
+#ifndef RS485_POWER_CONTROL_ENABLED
+#define RS485_POWER_CONTROL_ENABLED 0
+#endif
+#ifndef RS485_POWER_ACTIVE_LOW
+#define RS485_POWER_ACTIVE_LOW 0
+#endif
+#ifndef RS485_POWER_SETTLE_MS
+#define RS485_POWER_SETTLE_MS 100
+#endif
+#ifndef RS485_BRIDGE_USB_BAUD
+#define RS485_BRIDGE_USB_BAUD 9600
+#endif
+#ifndef RS485_BRIDGE_BUFFER_SIZE
+#define RS485_BRIDGE_BUFFER_SIZE 128
+#endif
+#ifndef RS485_BRIDGE_FRAME_GAP_US
+#define RS485_BRIDGE_FRAME_GAP_US 3000
+#endif
+
+#define RS485_CONFIG SERIAL_8N1
+
+constexpr bool kBridgeHasPowerControl = RS485_POWER_CONTROL_ENABLED && (RS485_POWER_PIN >= 0);
+constexpr bool kBridgeHasDirectionPin = RS485_EN >= 0;
+
+void setBridgePower(bool on) {
+    if constexpr (!kBridgeHasPowerControl) return;
+
+    const bool level = RS485_POWER_ACTIVE_LOW ? !on : on;
+    digitalWrite(RS485_POWER_PIN, level ? HIGH : LOW);
+}
+
+void setBridgeTransmit(bool on) {
+    if constexpr (!kBridgeHasDirectionPin) return;
+
+    digitalWrite(RS485_EN, on ? HIGH : LOW);
+}
+
+void writeRs485(const uint8_t *buffer, size_t size) {
+    if (size == 0) return;
+
+    setBridgeTransmit(true);
+    Serial1.write(buffer, size);
+    Serial1.flush();
+    setBridgeTransmit(false);
+}
+
+void setup() {
+    Serial.begin(RS485_BRIDGE_USB_BAUD);
+
+    if constexpr (kBridgeHasPowerControl) {
+        pinMode(RS485_POWER_PIN, OUTPUT);
+        setBridgePower(true);
+        delay(RS485_POWER_SETTLE_MS);
+    }
+
+    if constexpr (kBridgeHasDirectionPin) {
+        pinMode(RS485_EN, OUTPUT);
+        setBridgeTransmit(false);
+    }
+
+    Serial1.begin(RS485_BAUD, RS485_CONFIG, RS485_RX, RS485_TX);
+}
+
+void pumpUsbToRs485() {
+    static uint8_t buffer[RS485_BRIDGE_BUFFER_SIZE];
+    static size_t size = 0;
+    static uint32_t lastByteAt = 0;
+
+    while (Serial.available() > 0) {
+        if (size >= sizeof(buffer)) {
+            writeRs485(buffer, size);
+            size = 0;
+        }
+        buffer[size++] = static_cast<uint8_t>(Serial.read());
+        lastByteAt = micros();
+    }
+
+    if (size > 0 && static_cast<uint32_t>(micros() - lastByteAt) >= RS485_BRIDGE_FRAME_GAP_US) {
+        writeRs485(buffer, size);
+        size = 0;
+    }
+}
+
+void pumpRs485ToUsb() {
+    static uint8_t buffer[RS485_BRIDGE_BUFFER_SIZE];
+    static size_t size = 0;
+    static uint32_t lastByteAt = 0;
+
+    while (Serial1.available() > 0) {
+        if (size >= sizeof(buffer)) {
+            Serial.write(buffer, size);
+            size = 0;
+        }
+        buffer[size++] = static_cast<uint8_t>(Serial1.read());
+        lastByteAt = micros();
+    }
+
+    if (size > 0 && static_cast<uint32_t>(micros() - lastByteAt) >= RS485_BRIDGE_FRAME_GAP_US) {
+        Serial.write(buffer, size);
+        Serial.flush();
+        size = 0;
+    }
+}
+
+void loop() {
+    pumpUsbToRs485();
+    pumpRs485ToUsb();
+}
+
+#else
 
 #ifndef ZIGBEE_MODE_ED
 #error "Select Tools -> Zigbee mode -> End Device"
@@ -18,9 +142,9 @@
 #include <Preferences.h>
 #include "nvs_flash.h"
 #include "esp_partition.h"
-#include <memory> // For std::unique_ptr
+#include <algorithm>
+#include <memory>
 
-// Abstraction Layers
 #include "utils.h"
 #include "zigbee_water_meter.h"
 #include "zigbee_device_power.h"
@@ -28,10 +152,10 @@
 #include "drivers/driver_factory.h"
 #include "sources/factory_source.h"
 
-/* --- VERSION --- */
 #include "../include/version.h"
 
-/* --- HARDWARE CONFIGURATION (from build_flags, with safe defaults) --- */
+// Hardware settings come from PlatformIO build flags. The fallback values keep
+// local builds explicit when a board environment omits a define.
 #ifndef RGB_LED_PIN
 #define RGB_LED_PIN -1
 #endif
@@ -50,6 +174,9 @@
 #endif
 #ifndef RS485_POWER_PIN
 #define RS485_POWER_PIN  18
+#endif
+#ifndef RS485_POWER_CONTROL_ENABLED
+#define RS485_POWER_CONTROL_ENABLED 1
 #endif
 #ifndef RS485_RX
 #define RS485_RX         21
@@ -101,6 +228,9 @@
 #ifndef ADC_BATTERY_SAMPLE_DELAY_MS
 #define ADC_BATTERY_SAMPLE_DELAY_MS 2
 #endif
+#ifndef ADC_BATTERY_PERCENT_SMOOTHING_SAMPLES
+#define ADC_BATTERY_PERCENT_SMOOTHING_SAMPLES 5
+#endif
 #ifndef ADC_BATTERY_CURVE_EMPTY_MV
 #define ADC_BATTERY_CURVE_EMPTY_MV 2000
 #endif
@@ -122,8 +252,26 @@
 #ifndef RS485_POWER_SETTLE_MS
 #define RS485_POWER_SETTLE_MS 100
 #endif
+#ifndef RS485_POWER_ACTIVE_LOW
+#define RS485_POWER_ACTIVE_LOW 0
+#endif
+#ifndef RS485_POWER_IDLE_OFF_MS
+#define RS485_POWER_IDLE_OFF_MS 60000
+#endif
+#ifndef RS485_TX_TEST_MS
+#define RS485_TX_TEST_MS 0
+#endif
+#ifndef RS485_TX_GPIO_TEST_MS
+#define RS485_TX_GPIO_TEST_MS 0
+#endif
+#ifndef DEFAULT_COLD_SERIAL
+#define DEFAULT_COLD_SERIAL 0
+#endif
+#ifndef DEFAULT_HOT_SERIAL
+#define DEFAULT_HOT_SERIAL 0
+#endif
 
-/* --- ZIGBEE CONFIGURATION (from build_flags, with safe defaults) --- */
+// Zigbee identity settings can be overridden per PlatformIO environment.
 #ifndef MODEL_ID
 #define MODEL_ID "C6_WATER_METER"
 #endif
@@ -135,39 +283,85 @@
 #endif
 #define RECCONNECT_TIMEOUT 60000
 
-/* --- APPLICATION CONFIGURATION --- */
-constexpr bool kEnableTestIntervals = false; // Set to true for fast hourly/daily reports (10s/20s)
-constexpr uint32_t COMMISSIONING_AWAKE_MS = 180000; // Keep device awake for interview/configure window
+namespace TimeLiterals {
+constexpr uint32_t operator"" _ms(unsigned long long value) {
+    return static_cast<uint32_t>(value);
+}
+
+constexpr uint32_t operator"" _s(unsigned long long value) {
+    return static_cast<uint32_t>(value * 1000ULL);
+}
+
+constexpr uint32_t operator"" _mins(unsigned long long value) {
+    return static_cast<uint32_t>(value * 60ULL * 1000ULL);
+}
+
+constexpr uint32_t operator"" _h(unsigned long long value) {
+    return static_cast<uint32_t>(value * 60ULL * 60ULL * 1000ULL);
+}
+
+constexpr uint32_t operator"" _s_sec(unsigned long long value) {
+    return static_cast<uint32_t>(value);
+}
+
+constexpr uint32_t operator"" _mins_sec(unsigned long long value) {
+    return static_cast<uint32_t>(value * 60ULL);
+}
+
+constexpr uint32_t operator"" _h_sec(unsigned long long value) {
+    return static_cast<uint32_t>(value * 60ULL * 60ULL);
+}
+}  // namespace TimeLiterals
+
+using namespace TimeLiterals;
+
+// Keep this false in normal builds. When enabled, hourly and daily accounting
+// windows are shortened for telemetry testing.
+constexpr bool kEnableTestIntervals = false;
+
+// Keep the device awake long enough for Zigbee interview and configuration.
+constexpr uint32_t COMMISSIONING_AWAKE_MS = 3_mins;
 
 #ifdef TEST
+#ifdef TEST_REAL_METERS
+constexpr Source::SourceType COLD_TYPE = Source::SourceType::Smart;
+constexpr Source::SourceType HOT_TYPE  = Source::SourceType::Smart;
+#else
 constexpr Source::SourceType COLD_TYPE = Source::SourceType::Test;
 constexpr Source::SourceType HOT_TYPE  = Source::SourceType::Test;
-constexpr uint32_t COLD_POOL_INTERVAL = 3000; // Интервал опроса для холодного канала (мс) Test
-constexpr uint32_t HOT_POOL_INTERVAL  = 3000; // Интервал опроса для горячего канала (мс) Test
+#endif
+constexpr uint32_t COLD_POOL_INTERVAL = 3_s;
+constexpr uint32_t HOT_POOL_INTERVAL  = 3_s;
 
-constexpr uint32_t HEARTBEAT_INTERVAL = 60000; // Heartbeat interval for HA (ms)
-constexpr uint32_t BATTERY_REPORT_INTERVAL = 60000; // Interval for reporting battery status (ms)
-constexpr uint32_t DEEP_SLEEP_THRESHOLD = 3600; // Keep device awake longer in test mode (seconds)
-constexpr uint32_t LOOP_IDLE_DELAY = 100; // Main loop idle delay for test mode (ms)
+constexpr uint32_t HEARTBEAT_INTERVAL = 1_mins;
+constexpr uint32_t BATTERY_REPORT_INTERVAL = 1_mins;
+constexpr uint32_t DEEP_SLEEP_THRESHOLD_SECONDS = 1_h_sec;
+constexpr uint32_t LOOP_IDLE_DELAY = 100_ms;
 
 #else
-constexpr uint32_t HEARTBEAT_INTERVAL = 60000 * 30; // Heartbeat interval for HA (ms)
-constexpr uint32_t BATTERY_REPORT_INTERVAL = 60000 * 60 * 6; // Interval for reporting battery status (ms)
-constexpr uint32_t COLD_POOL_INTERVAL = 60000 * 30; // Polling interval for cold channel (ms)
-constexpr uint32_t HOT_POOL_INTERVAL  = 60000 * 30; // Polling interval for hot channel (ms)
-constexpr uint32_t DEEP_SLEEP_THRESHOLD = 60; // Time in seconds before entering deep sleep when idle
-constexpr uint32_t LOOP_IDLE_DELAY = 15000; // Main loop idle delay (ms)
+constexpr uint32_t HEARTBEAT_INTERVAL = 30_mins;
+constexpr uint32_t BATTERY_REPORT_INTERVAL = 6_h;
+constexpr uint32_t COLD_POOL_INTERVAL = 30_mins;
+constexpr uint32_t HOT_POOL_INTERVAL  = 30_mins;
+constexpr uint32_t DEEP_SLEEP_THRESHOLD_SECONDS = 1_mins_sec;
+constexpr uint32_t LOOP_IDLE_DELAY = 15_s;
 
 constexpr Source::SourceType COLD_TYPE = Source::SourceType::Smart;
 constexpr Source::SourceType HOT_TYPE = Source::SourceType::Smart;
-# endif
+#endif
 
 
 constexpr Driver::MeterModel COLD_DRV_MODEL = Driver::MeterModel::Pulsar_Du_15_20;
 constexpr Driver::MeterModel HOT_DRV_MODEL = Driver::MeterModel::Pulsar_Du_15_20;
 
+// Compile-time flag avoids initializing RS485 hardware in Pulse/Test-only builds.
 constexpr bool NEED_RS485 = (COLD_TYPE == Source::SourceType::Smart || HOT_TYPE == Source::SourceType::Smart);
+constexpr bool COLD_USES_RS485 = COLD_TYPE == Source::SourceType::Smart;
+constexpr bool HOT_USES_RS485 = HOT_TYPE == Source::SourceType::Smart;
+constexpr bool HAS_RS485_POWER_CONTROL = NEED_RS485 && RS485_POWER_CONTROL_ENABLED && (RS485_POWER_PIN >= 0);
 
+// Runtime sleep is deferred until the coordinator has had time to interview all
+// endpoints and apply configuration.
 static uint32_t g_join_time_ms = 0;
 static bool g_sleep_enabled_runtime = false;
 
@@ -179,14 +373,12 @@ inline void StatusLedFlash(uint8_t r, uint8_t g, uint8_t b, uint32_t ms) {
     Utils::flashLed(r, g, b, ms);
 }
 
-/* --- GLOBAL OBJECTS --- */
 Preferences prefs;
 std::unique_ptr<RS485Stream> rs485Bus = nullptr; 
 
-// Zigbee Endpoints
-ZigbeeWaterMeter zigbeeCold(1, true); 
+// Endpoint layout is part of the Zigbee2MQTT converter contract.
+ZigbeeWaterMeter zigbeeCold(1, true);
 ZigbeeWaterMeter zigbeeHot(2, false);
-// Endpoint 3: System Power (ESP32 Battery)
 ZigbeeDevicePower zigbeePower(
     3,
     ADC_BATTERY_VOLTAGE_PIN,
@@ -203,23 +395,94 @@ ZigbeeDevicePower zigbeePower(
     ADC_BATTERY_CURVE_LOW_MV,
     ADC_BATTERY_CURVE_MID_MV,
     ADC_BATTERY_CURVE_HIGH_MV,
-    ADC_BATTERY_CURVE_FULL_MV
+    ADC_BATTERY_CURVE_FULL_MV,
+    ADC_BATTERY_PERCENT_SMOOTHING_SAMPLES
 );
 
 
-// Interfaces (Pointers)
+// Drivers own protocol state; sources own per-channel metering state.
 std::unique_ptr<Driver::SmartMeterDriver> coldDrv = nullptr;
 std::unique_ptr<Driver::SmartMeterDriver> hotDrv = nullptr;
 std::unique_ptr<Source::WaterSource> coldSrc = nullptr;
 std::unique_ptr<Source::WaterSource> hotSrc = nullptr;
 
-/* --- ZIGBEE EVENT HANDLER --- */
-static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message) {
-    if (message == nullptr) {
-        return ESP_OK;  // Safety: некоторые callback могут приходить без данных
+static bool g_rs485_power_on = false;
+static bool g_rs485_bus_started = false;
+
+void setRs485Power(bool on) {
+    if constexpr (!HAS_RS485_POWER_CONTROL) return;
+
+    if (g_rs485_power_on == on) return;
+    const bool level = RS485_POWER_ACTIVE_LOW ? !on : on;
+    digitalWrite(RS485_POWER_PIN, level ? HIGH : LOW);
+    g_rs485_power_on = on;
+    Serial.printf("RS485: power %s on GPIO%d\n", on ? "ON" : "OFF", RS485_POWER_PIN);
+}
+
+void beginRs485Bus() {
+    if (!rs485Bus || g_rs485_bus_started) return;
+
+    rs485Bus->begin(RS485_BAUD, RS485_CONFIG, RS485_RX, RS485_TX);
+    rs485Bus->setTimeout(300);
+    g_rs485_bus_started = true;
+}
+
+void endRs485Bus() {
+    if (!rs485Bus || !g_rs485_bus_started) return;
+
+    rs485Bus->flush();
+    rs485Bus->end();
+    g_rs485_bus_started = false;
+
+    if constexpr (RS485_TX >= 0) pinMode(RS485_TX, INPUT);
+    if constexpr (RS485_RX >= 0) pinMode(RS485_RX, INPUT);
+    if constexpr (RS485_EN >= 0) pinMode(RS485_EN, INPUT);
+}
+
+void enableRs485ForPoll() {
+    if constexpr (HAS_RS485_POWER_CONTROL) {
+        const bool wasOn = g_rs485_power_on;
+        setRs485Power(true);
+        if (!wasOn) delay(RS485_POWER_SETTLE_MS);
+    }
+    beginRs485Bus();
+}
+
+void disableRs485AfterPoll() {
+    if constexpr (!HAS_RS485_POWER_CONTROL) return;
+
+    endRs485Bus();
+    setRs485Power(false);
+}
+
+uint32_t millisUntilNextRs485Poll(uint32_t now) {
+    uint32_t nextDelay = UINT32_MAX;
+
+    if constexpr (COLD_USES_RS485) {
+        if (coldSrc) nextDelay = std::min(nextDelay, coldSrc->millisUntilPoll(now));
+    }
+    if constexpr (HOT_USES_RS485) {
+        if (hotSrc) nextDelay = std::min(nextDelay, hotSrc->millisUntilPoll(now));
     }
 
-    // Handle attribute write commands from coordinator
+    return nextDelay;
+}
+
+bool shouldPowerDownRs485(uint32_t now) {
+    if constexpr (!HAS_RS485_POWER_CONTROL) return false;
+    if constexpr (RS485_POWER_IDLE_OFF_MS == 0) return true;
+
+    const uint32_t nextDelay = millisUntilNextRs485Poll(now);
+    return nextDelay == UINT32_MAX || nextDelay > RS485_POWER_IDLE_OFF_MS;
+}
+
+// Handles Zigbee stack callbacks that affect attributes, connection state, or
+// sleep scheduling.
+static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message) {
+    if (message == nullptr) {
+        return ESP_OK;
+    }
+
     if (callback_id == ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID) {
         auto *msg = (esp_zb_zcl_set_attr_value_message_t *)message;
         if (msg->info.dst_endpoint == zigbeeCold.getEndpoint()) {
@@ -232,23 +495,16 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         return ESP_OK;
     }
 
-    // Handle sleep signal (End Device only)
-    // NOTE: For ED, sleep is managed automatically by the stack.
-    // This callback is informational and should NOT call esp_zb_sleep_now().
+    // End devices let the Zigbee stack enter light sleep automatically. Calling
+    // esp_zb_sleep_now() here can race with stack-owned scheduling.
     if (callback_id == (esp_zb_core_action_callback_id_t)ESP_ZB_COMMON_SIGNAL_CAN_SLEEP) {
-        // Stack will automatically enter light sleep between polls.
-        // We don't disable RS485 power here because:
-        // 1. Light sleep keeps peripherals powered
-        // 2. We need RS485 ready when device wakes for polling
-        // 3. Manual power control here causes race conditions
         return ESP_OK;
     }
 
-    // Handle Zigbee application signals (connection, steering, leave)
-    // Только для этих callback_id message является esp_zb_app_signal_t*
+    // The remaining handled callbacks use esp_zb_app_signal_t payloads.
     esp_zb_app_signal_t *signal = (esp_zb_app_signal_t *)message;
     if (signal->p_app_signal == nullptr) {
-        return ESP_OK;  // Защита от невалидного сигнала
+        return ESP_OK;
     }
 
     esp_zb_app_signal_type_t sig_type = (esp_zb_app_signal_type_t)*signal->p_app_signal;
@@ -258,18 +514,14 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         case ESP_ZB_ZDO_SIGNAL_LEAVE:
             Serial.println("Zigbee: Connection lost (Leave). Rebooting...");
             StatusLedFlash(50, 0, 0, 500);
-            if constexpr (NEED_RS485) digitalWrite(RS485_POWER_PIN, LOW);
+            disableRs485AfterPoll();
             delay(100);
             esp_restart();
             break;
 
         case ESP_ZB_BDB_SIGNAL_STEERING:
             if (sig_status == ESP_OK) {
-                Serial.println("Zigbee: Connected successfully. Enabling RS485 power.");
-                if constexpr (NEED_RS485) {
-                    digitalWrite(RS485_POWER_PIN, HIGH);
-                    delay(RS485_POWER_SETTLE_MS);
-                }
+                Serial.println("Zigbee: Connected successfully.");
                 g_join_time_ms = millis();
                 g_sleep_enabled_runtime = false;
                 esp_zb_sleep_enable(false);
@@ -281,10 +533,6 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
 
         case ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP:
             Serial.println("Zigbee: Device already commissioned, skipping pairing.");
-            if constexpr (NEED_RS485) {
-                digitalWrite(RS485_POWER_PIN, HIGH);
-                delay(RS485_POWER_SETTLE_MS);
-            }
             g_join_time_ms = millis();
             g_sleep_enabled_runtime = false;
             esp_zb_sleep_enable(false);
@@ -292,16 +540,15 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
             break;
 
         default:
-            // Игнорируем другие сигналы (Production Update, Device Announce и т.д.)
             break;
     }
     
     return ESP_OK;
 }
 
-/* --- INTERRUPTS (PulseSource Only) --- */
+// These ISRs are only attached when the matching source is a PulseSource.
 void IRAM_ATTR isr_cold() { 
-    if(coldSrc) { // Проверка типа неявна в static_cast
+    if(coldSrc) {
         static_cast<Source::PulseSource*>(coldSrc.get())->increment(); 
     }
 }
@@ -320,28 +567,47 @@ void saveConfiguration() {
     auto co = zigbeeCold.get_offset();
     auto hs = zigbeeHot.get_serial();
     auto ho = zigbeeHot.get_offset();  
+    auto cp = zigbeeCold.get_poll_interval_minutes();
+    auto hp = zigbeeHot.get_poll_interval_minutes();
 
-    Serial.printf("Config to save -> Cold SN:%lu, Cold Off:%ld, Hot SN:%lu, Hot Off:%ld\n", cs, co, hs, ho);
+    Serial.printf(
+        "Config to save -> Cold SN:%lu, Cold Off:%ld, Cold Poll:%u min, Hot SN:%lu, Hot Off:%ld, Hot Poll:%u min\n",
+        cs,
+        co,
+        cp,
+        hs,
+        ho,
+        hp
+    );
 
-    // Save Cold channel settings
     prefs.putUInt("sc", cs);
     prefs.putInt("oc", co);
+    prefs.putUInt("pc", cp);
     
-    // Save Hot channel settings
     prefs.putUInt("sh", hs);
     prefs.putInt("oh", ho);
+    prefs.putUInt("ph", hp);
     
-    // Save current liters (since NVS is already open for writing)
-    prefs.putULong64("cl", zigbeeCold.get_val());
-    prefs.putULong64("hl", zigbeeHot.get_val());
+    if (zigbeeCold.readings_valid()) {
+        prefs.putULong64("cl", zigbeeCold.get_val());
+    } else {
+        Serial.println("Config save: skipped cold reading because source data is not valid yet.");
+    }
+
+    if (zigbeeHot.readings_valid()) {
+        prefs.putULong64("hl", zigbeeHot.get_val());
+    } else {
+        Serial.println("Config save: skipped hot reading because source data is not valid yet.");
+    }
 }
 
-// Emergency recovery: Erase all data if button is held at boot
+// Erases NVS and Zigbee storage only when the boot button is held through the
+// confirmation delay.
 void checkBootRecovery() {
     if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
         Serial.println("\n!!! BOOT BUTTON HELD - RECOVERY MODE !!!");
-        StatusLedSet(50, 0, 0); // Red warning
-        delay(3000); // Wait to confirm intention
+        StatusLedSet(50, 0, 0);
+        delay(3000);
         
         if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
             Serial.println("Erasing NVS...");
@@ -357,14 +623,15 @@ void checkBootRecovery() {
                 Serial.println("Partition 'zb_storage' not found!");
             }
 
-            StatusLedFlash(0, 50, 0, 1000); // Green success
+            StatusLedFlash(0, 50, 0, 1000);
             Serial.println("Restarting...");
             ESP.restart();
         }
     }
 }
 
-/* --- Forward declarations (needed because PlatformIO compiles .cpp) --- */
+// PlatformIO compiles this file as C++, so declarations keep Arduino-style
+// function ordering explicit.
 void initHardware();
 void checkBootRecovery();
 void loadSystemData();
@@ -377,13 +644,14 @@ void handleConfigSave();
 void updateStatusIndication();
 void checkServiceButton();
 void saveConfiguration();
+#ifdef TEST
+void logBatteryAdcForTest();
+#endif
 
-// Standard Arduino setup function.
 void setup() {
     Serial.begin(115200);
-    delay(100); // Allow time for serial to initialize before printing boot messages
+    delay(100);
     
-    // Print firmware version
     Serial.println("\n╔════════════════════════════════════════════════════════╗");
     Serial.printf("║  ESP32-C6 Zigbee Water Meter v%s              ║\n", firmware::version::kFirmwareVersion.data());
     Serial.printf("║  Build: %s                              ║\n", firmware::version::kBuildTimestamp.data());
@@ -405,29 +673,75 @@ void setup() {
             break;
     }
     
-    initHardware();    // Layer 0: Hardware and Power
-    checkBootRecovery(); // Emergency Reset Check
-    loadSystemData();  // Layer 1: Storage (NVS)
-    initSources();     // Layer 2: Drivers and Sources
-    setupZigbee();     // Layer 3: Network Stack
+    initHardware();
+    checkBootRecovery();
+    loadSystemData();
+    initSources();
+    setupZigbee();
     
     Serial.println("--- System initialized and running ---");
-    StatusLedFlash(0, 30, 0, 1000); // Final green signal
+    StatusLedFlash(0, 30, 0, 1000);
 }
 
 void initHardware() {
     Serial.begin(115200);
-    StatusLedSet(30, 0, 0); // Статус: Загрузка
+    StatusLedSet(30, 0, 0);
 
-    // Шина данных
     if constexpr (NEED_RS485) {
-        pinMode(RS485_POWER_PIN, OUTPUT);
-        digitalWrite(RS485_POWER_PIN, HIGH); // Включаем питание шины
-        delay(RS485_POWER_SETTLE_MS);
-
         rs485Bus = std::make_unique<RS485Stream>(&Serial1, RS485_EN);
-        rs485Bus->begin(RS485_BAUD, RS485_CONFIG, RS485_RX, RS485_TX);
-        rs485Bus->setTimeout(300);
+
+        if constexpr (HAS_RS485_POWER_CONTROL) {
+            pinMode(RS485_POWER_PIN, OUTPUT);
+            const bool offLevel = RS485_POWER_ACTIVE_LOW ? true : false;
+            digitalWrite(RS485_POWER_PIN, offLevel ? HIGH : LOW);
+            g_rs485_power_on = false;
+            endRs485Bus();
+        }
+
+#if RS485_TX_GPIO_TEST_MS > 0
+        enableRs485ForPoll();
+        Serial.printf("RS485: GPIO TX pin test on GPIO%d for %lu ms\n", RS485_TX, (unsigned long)RS485_TX_GPIO_TEST_MS);
+        pinMode(RS485_TX, OUTPUT);
+        const uint32_t gpioTestStart = millis();
+        bool level = false;
+        while (millis() - gpioTestStart < RS485_TX_GPIO_TEST_MS) {
+            level = !level;
+            digitalWrite(RS485_TX, level ? HIGH : LOW);
+            delay(500);
+        }
+        digitalWrite(RS485_TX, HIGH);
+#endif
+
+        if constexpr (!HAS_RS485_POWER_CONTROL) {
+            beginRs485Bus();
+        }
+
+        Serial.printf(
+            "RS485: UART RX=%d TX=%d EN=%d power=%d power_control=%d active_low=%d idle_off=%lu ms baud=%lu\n",
+            RS485_RX,
+            RS485_TX,
+            RS485_EN,
+            RS485_POWER_PIN,
+            RS485_POWER_CONTROL_ENABLED,
+            RS485_POWER_ACTIVE_LOW,
+            (unsigned long)RS485_POWER_IDLE_OFF_MS,
+            (unsigned long)RS485_BAUD
+        );
+
+#if RS485_TX_TEST_MS > 0
+        enableRs485ForPoll();
+        Serial.printf("RS485: TX diagnostic burst for %lu ms\n", (unsigned long)RS485_TX_TEST_MS);
+        const uint32_t txTestStart = millis();
+        while (millis() - txTestStart < RS485_TX_TEST_MS) {
+            rs485Bus->write((uint8_t)0x55);
+            delay(2);
+        }
+        rs485Bus->flush();
+#endif
+
+#if RS485_TX_GPIO_TEST_MS > 0 || RS485_TX_TEST_MS > 0
+        disableRs485AfterPoll();
+#endif
     }
     
     pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
@@ -435,26 +749,45 @@ void initHardware() {
 
 void loadSystemData() {
     prefs.begin("water", false);
-    // Open storage. Data reading is done in initSources for localization.
 }
 
 void initSources() {
-    // 1. Read settings from memory
+    // Storage keys are intentionally short to reduce NVS metadata overhead.
     uint32_t c_sn  = prefs.getUInt("sc", 0);
     uint32_t h_sn  = prefs.getUInt("sh", 0);
     uint64_t c_lit = prefs.getULong64("cl", 0);
     uint64_t h_lit = prefs.getULong64("hl", 0);
     int32_t  c_off = prefs.getInt("oc", 0);
     int32_t  h_off = prefs.getInt("oh", 0);
-    
-// Loaded config -> Cold SN:10128442, Cold Off:0, Hot SN:10128939, Hot Off:0
+    uint32_t c_poll_min = prefs.getUInt("pc", 0);
+    uint32_t h_poll_min = prefs.getUInt("ph", 0);
 
-    Serial.printf("Loaded config -> Cold SN:%lu, Cold Off:%ld, Hot SN:%lu, Hot Off:%ld\n", c_sn, c_off, h_sn, h_off);
-    
-    // 2. Create Drivers (Protocol Layer)
+#if DEFAULT_COLD_SERIAL > 0
+    if (c_sn == 0) {
+        c_sn = DEFAULT_COLD_SERIAL;
+        Serial.printf("Using build default cold serial: %lu\n", (unsigned long)c_sn);
+    }
+#endif
+#if DEFAULT_HOT_SERIAL > 0
+    if (h_sn == 0) {
+        h_sn = DEFAULT_HOT_SERIAL;
+        Serial.printf("Using build default hot serial: %lu\n", (unsigned long)h_sn);
+    }
+#endif
+
+    Serial.printf(
+        "Loaded config -> Cold SN:%lu, Cold Off:%ld, Cold Poll:%lu min, Hot SN:%lu, Hot Off:%ld, Hot Poll:%lu min\n",
+        c_sn,
+        c_off,
+        (unsigned long)(c_poll_min > 0 ? c_poll_min : (COLD_POOL_INTERVAL + Source::kMsPerMinute - 1) / Source::kMsPerMinute),
+        h_sn,
+        h_off,
+        (unsigned long)(h_poll_min > 0 ? h_poll_min : (HOT_POOL_INTERVAL + Source::kMsPerMinute - 1) / Source::kMsPerMinute)
+    );
+
     if constexpr (COLD_TYPE == Source::SourceType::Smart) {
         coldDrv.reset(Driver::DriverFactory::create(COLD_DRV_MODEL, rs485Bus.get(), c_sn));
-        if (coldDrv) coldDrv->setLogger(&Serial); // Передаем raw pointer для логирования
+        if (coldDrv) coldDrv->setLogger(&Serial);
     } else {
         Serial.println("Cold driver not created");
     }
@@ -466,13 +799,15 @@ void initSources() {
         Serial.println("Hot driver not created");
     }
 
-    // 3. Create Sources (Logic Layer)
     coldSrc.reset(Source::SourceFactory::create(COLD_TYPE, c_lit, PULSE_COLD_PIN, coldDrv.get()));
     hotSrc.reset(Source::SourceFactory::create(HOT_TYPE,  h_lit,  PULSE_HOT_PIN,  hotDrv.get()));
 
-    // 4. Fine Tuning (Offsets & Start)
     if (coldSrc) { 
-        coldSrc->setPollInterval(COLD_POOL_INTERVAL);
+        if (c_poll_min > 0) {
+            coldSrc->setPollIntervalMinutes(c_poll_min);
+        } else {
+            coldSrc->setPollInterval(COLD_POOL_INTERVAL);
+        }
         coldSrc->setOffset(c_off); 
         coldSrc->setTestMode(kEnableTestIntervals);
         coldSrc->setSerialNumber(c_sn);
@@ -484,7 +819,11 @@ void initSources() {
         Serial.println("Cold source not created");
     }
     if (hotSrc) { 
-        hotSrc->setPollInterval(HOT_POOL_INTERVAL);
+        if (h_poll_min > 0) {
+            hotSrc->setPollIntervalMinutes(h_poll_min);
+        } else {
+            hotSrc->setPollInterval(HOT_POOL_INTERVAL);
+        }
         hotSrc->setOffset(h_off); 
         hotSrc->setTestMode(kEnableTestIntervals);
         hotSrc->setSerialNumber(h_sn);
@@ -498,11 +837,9 @@ void initSources() {
 }
 
 void setupZigbee() {
-    // Bind sources to endpoints
     zigbeeCold.setSource(coldSrc.get());
     zigbeeHot.setSource(hotSrc.get());
 
-    // Register endpoints in the stack
     zigbeeCold.begin(); 
     zigbeeHot.begin();
     zigbeePower.begin();
@@ -511,19 +848,15 @@ void setupZigbee() {
     Zigbee.addEndpoint(&zigbeeHot);
     Zigbee.addEndpoint(&zigbeePower);
 
-    // Идентификация устройства
     zigbeeCold.setManufacturerAndModel(MANUFACTURER_NAME, MODEL_ID);
     zigbeeHot.setManufacturerAndModel(MANUFACTURER_NAME, MODEL_ID);
 
-    // Configure sleep before starting the stack
-    // Set threshold: device will enter deep sleep if idle time > 60 seconds
-    esp_zb_sleep_set_threshold(DEEP_SLEEP_THRESHOLD);  
+    esp_zb_sleep_set_threshold(DEEP_SLEEP_THRESHOLD_SECONDS);
     esp_zb_sleep_enable(false);
     g_sleep_enabled_runtime = false;
     
-    Serial.printf("Zigbee: Sleep deferred. Threshold=%lus\n", (unsigned long)DEEP_SLEEP_THRESHOLD);
+    Serial.printf("Zigbee: Sleep deferred. Threshold=%lus\n", (unsigned long)DEEP_SLEEP_THRESHOLD_SECONDS);
 
-    // Start the stack
     if(!Zigbee.begin(ZIGBEE_END_DEVICE)) {
         Serial.println("Zigbee: CRITICAL ERROR STARTING STACK");
         Serial.println("Data corruption detected or Partition Scheme mismatch.");
@@ -533,13 +866,14 @@ void setupZigbee() {
     esp_zb_set_tx_power(TX_POWER);
 }
 
-// 2. Smart Zigbee Reporting
+// Non-blocking reporting state machine. Each state sends at most one Zigbee
+// report, then yields back to loop().
 enum ReportState { 
     IDLE, 
     PENDING_COLD_CONFIG, PENDING_HOT_CONFIG, 
     PENDING_COLD_HOURLY, PENDING_HOT_HOURLY, 
     PENDING_COLD_VALUE,  PENDING_HOT_VALUE,
-    PENDING_HEARTBEAT_COLD // A state specifically for the heartbeat sequence
+    PENDING_HEARTBEAT_COLD
 };
 static ReportState reportState = IDLE;
 static uint32_t nextActionTime = 0;
@@ -547,10 +881,13 @@ static uint32_t nextActionTime = 0;
 void loop() {
     static bool connected_logged = false;
     static uint32_t last_loop_log = 0;
-    static uint32_t last_sleep_cycle_start = 0;  // Track sleep cycle start
+    static uint32_t last_sleep_cycle_start = 0;
     uint32_t now = millis();
     
     updateSources();
+#ifdef TEST
+    logBatteryAdcForTest();
+#endif
 
     if (Zigbee.connected()) {
         if (!connected_logged) {
@@ -575,7 +912,6 @@ void loop() {
     updateStatusIndication();
     checkServiceButton();
     
-    // Diagnostic logging with proper sleep cycle tracking
     if (now - last_loop_log >= 120000) {
         last_loop_log = now;
         uint32_t sleep_cycle_duration = now - last_sleep_cycle_start;
@@ -585,20 +921,106 @@ void loop() {
                       Zigbee.connected() ? "YES" : "NO", now / 60000, sleep_cycle_duration);
     }
     
-    // Always delay to allow sleep, but more aggressively when idle
     if (reportState == IDLE && Zigbee.connected()) {
-        delay(LOOP_IDLE_DELAY);  // 5000ms - deep sleep can trigger here
+        delay(LOOP_IDLE_DELAY);
     } else {
-        delay(100);  // Minimal delay during active reporting
+        delay(100);
     }
 }
 
-/* --- BLOCK IMPLEMENTATIONS --- */
+#ifdef TEST
+// Logs battery ADC input without requiring Zigbee connectivity.
+void logBatteryAdcForTest() {
+    static uint32_t last_adc_log = 0;
+    uint32_t now = millis();
+    if (now - last_adc_log < 5000) return;
+    last_adc_log = now;
 
-// 1. Update Data Sources
+#if ADC_BATTERY_VOLTAGE_PIN < 0
+    Serial.println("ADC Test: disabled because ADC_BATTERY_VOLTAGE_PIN < 0");
+#else
+    if constexpr (ADC_BATTERY_ENABLE_PIN >= 0) {
+        const bool level = ADC_BATTERY_ENABLE_ACTIVE_LOW ? false : true;
+        pinMode(ADC_BATTERY_ENABLE_PIN, OUTPUT);
+        digitalWrite(ADC_BATTERY_ENABLE_PIN, level ? HIGH : LOW);
+        if (ADC_BATTERY_POWER_SETTLE_MS > 0) delay(ADC_BATTERY_POWER_SETTLE_MS);
+    }
+
+    uint32_t total_mv = 0;
+    const uint8_t samples = ADC_BATTERY_SAMPLES > 0 ? ADC_BATTERY_SAMPLES : 1;
+    for (uint8_t i = 0; i < samples; ++i) {
+        total_mv += analogReadMilliVolts(ADC_BATTERY_VOLTAGE_PIN);
+        if (i + 1 < samples && ADC_BATTERY_SAMPLE_DELAY_MS > 0) {
+            delay(ADC_BATTERY_SAMPLE_DELAY_MS);
+        }
+    }
+
+    if constexpr (ADC_BATTERY_ENABLE_PIN >= 0) {
+        const bool level = ADC_BATTERY_ENABLE_ACTIVE_LOW ? true : false;
+        digitalWrite(ADC_BATTERY_ENABLE_PIN, level ? HIGH : LOW);
+    }
+
+    uint32_t raw_mv = total_mv / samples;
+    int32_t calibrated_mv = (int32_t)((raw_mv * ADC_BATTERY_VOLTAGE_SCALE) + ADC_BATTERY_VOLTAGE_OFFSET_MV + 0.5f);
+    if (calibrated_mv < 0) calibrated_mv = 0;
+
+    Serial.printf(
+        "ADC Test: pin=%d raw=%lu mV scale=%.3f battery=%ld mV samples=%u\n",
+        ADC_BATTERY_VOLTAGE_PIN,
+        (unsigned long)raw_mv,
+        (double)ADC_BATTERY_VOLTAGE_SCALE,
+        (long)calibrated_mv,
+        samples
+    );
+#endif
+}
+#endif
+
 void updateSources() {
+    const uint32_t now = millis();
+    bool rs485EnabledForPoll = false;
+
+    if constexpr (HAS_RS485_POWER_CONTROL) {
+        bool rs485PollDue = false;
+        if constexpr (COLD_USES_RS485) {
+            rs485PollDue = rs485PollDue || (coldSrc && coldSrc->isPollDue(now));
+        }
+        if constexpr (HOT_USES_RS485) {
+            rs485PollDue = rs485PollDue || (hotSrc && hotSrc->isPollDue(now));
+        }
+
+        if (rs485PollDue) {
+            enableRs485ForPoll();
+            rs485EnabledForPoll = true;
+        }
+    }
+
     if (coldSrc) coldSrc->tick();
     if (hotSrc)  hotSrc->tick();
+
+    if (rs485EnabledForPoll) {
+        const uint32_t afterPollNow = millis();
+        const uint32_t nextDelay = millisUntilNextRs485Poll(afterPollNow);
+
+        if (shouldPowerDownRs485(afterPollNow)) {
+            if (nextDelay == UINT32_MAX) {
+                Serial.println("RS485: no pending polls; powering down.");
+            } else {
+                Serial.printf(
+                    "RS485: next poll in %lu ms exceeds idle-off threshold %lu ms; powering down.\n",
+                    (unsigned long)nextDelay,
+                    (unsigned long)RS485_POWER_IDLE_OFF_MS
+                );
+            }
+            disableRs485AfterPoll();
+        } else {
+            Serial.printf(
+                "RS485: keeping power ON, next poll in %lu ms (idle-off threshold %lu ms).\n",
+                (unsigned long)nextDelay,
+                (unsigned long)RS485_POWER_IDLE_OFF_MS
+            );
+        }
+    }
 }
 
 
@@ -608,10 +1030,11 @@ void handleZigbeeReporting() {
     static bool initial_config_sent = false;
     uint32_t now = millis();
 
-    // Execute deferred action if it's time
+    // Keep Zigbee reports serialized so the stack has time to process each
+    // attribute update and outgoing report command.
     if (reportState != IDLE && now >= nextActionTime) {
         ReportState currentState = reportState;
-        reportState = IDLE; // Reset state before execution
+        reportState = IDLE;
         switch (currentState) {
             case PENDING_COLD_CONFIG:
                 zigbeeCold.reportConfig();
@@ -620,21 +1043,18 @@ void handleZigbeeReporting() {
                 break;
             case PENDING_COLD_HOURLY:
                 zigbeeCold.reportHourly();
-                // Check if hot needs reporting (chaining)
                 if (hotSrc && hotSrc->hasHourChanged()) {
                     reportState = PENDING_HOT_HOURLY;
                     nextActionTime = now + 100;
                 }
                 break;
-            case PENDING_HEARTBEAT_COLD: // Heartbeat always reports both channels
+            case PENDING_HEARTBEAT_COLD:
                 zigbeeCold.reportValue();
-                reportState = PENDING_HOT_VALUE; // Unconditionally chain to hot report
+                reportState = PENDING_HOT_VALUE;
                 nextActionTime = now + 100;
                 break;
             case PENDING_COLD_VALUE:
                 zigbeeCold.reportValue();
-                // This was an on-change report for cold.
-                // Only chain the hot report if its value has also changed.
                 if (zigbeeHot.shouldReport()) {
                     reportState = PENDING_HOT_VALUE;
                     nextActionTime = now + 100;
@@ -646,13 +1066,13 @@ void handleZigbeeReporting() {
             case PENDING_HOT_VALUE: zigbeeHot.reportValue(); break;
             default: break;
         }
-        return; // Executed one action per cycle
+        return;
     }
 
-    // Do not schedule new reports while there are pending ones
     if (reportState != IDLE) return;
 
-    // One-time configuration report (SN and Offset) at startup, non-blocking
+    // Report writable configuration after startup so the coordinator receives
+    // restored serial numbers and offsets without waiting for a write.
     if (!initial_config_sent && (now - boot_time > 5000)) {
         initial_config_sent = true;
         Serial.println("Zigbee: Reporting initial config...");
@@ -661,7 +1081,20 @@ void handleZigbeeReporting() {
         return;
     }
 
-    // Hourly consumption reports
+    if (zigbeeCold.needsConfigReport()) {
+        reportState = PENDING_COLD_CONFIG;
+        nextActionTime = now;
+        StatusLedSet(30, 30, 30);
+        return;
+    }
+
+    if (zigbeeHot.needsConfigReport()) {
+        reportState = PENDING_HOT_CONFIG;
+        nextActionTime = now;
+        StatusLedSet(30, 30, 30);
+        return;
+    }
+
     if (coldSrc && coldSrc->hasHourChanged()) {
         reportState = PENDING_COLD_HOURLY;
         nextActionTime = now;
@@ -670,7 +1103,6 @@ void handleZigbeeReporting() {
         nextActionTime = now;
     }
 
-    // Total value reports (on change or heartbeat)
     bool coldNeeds = zigbeeCold.shouldReport();
     bool hotNeeds  = zigbeeHot.shouldReport();
     bool isHeartbeat = (now - last_heartbeat >= HEARTBEAT_INTERVAL);
@@ -678,28 +1110,25 @@ void handleZigbeeReporting() {
     if (isHeartbeat) {
         Serial.println("Scheduling report -> Heartbeat");
         last_heartbeat = now;
-        reportState = PENDING_HEARTBEAT_COLD; // Start the full heartbeat sequence
+        reportState = PENDING_HEARTBEAT_COLD;
         nextActionTime = now;
         StatusLedSet(30, 30, 30);
     } else if (coldNeeds || hotNeeds) {
-        // Serial.printf("Scheduling report -> On-change. Cold: %s, Hot: %s\n", coldNeeds ? "YES" : "no", hotNeeds ? "YES" : "no");
-        // For on-change reports, schedule only what's needed
         if (coldNeeds) {
             reportState = PENDING_COLD_VALUE;
-        } else { // This means only hotNeeds is true
+        } else {
             reportState = PENDING_HOT_VALUE;
         }
         nextActionTime = now;
         StatusLedSet(30, 30, 30);
     }
 
-    // Battery report once an hour
     static uint32_t last_battery = 0;
     if (now - last_battery >= BATTERY_REPORT_INTERVAL || last_battery == 0) {
         last_battery = now;
         if (zigbeeCold.battery_supported()) zigbeeCold.reportBattery();
         if (zigbeeHot.battery_supported())  zigbeeHot.reportBattery();
-        uint8_t systemBatteryPercent = zigbeePower.reportStatus(); // Report ESP battery status
+        uint8_t systemBatteryPercent = zigbeePower.reportStatus();
         if (systemBatteryPercent <= LOW_BATTERY_CRITICAL_PERCENT) {
             Serial.printf(
                 "System Power: CRITICAL battery level (%u%%, %lu mV). Consider reducing polling or replacing battery.\n",
@@ -710,7 +1139,7 @@ void handleZigbeeReporting() {
     }
 }
 
-// 3. Auto-save (NVS)
+// Periodically persists readings even when no Zigbee configuration changed.
 void handleAutoSave() {
     static uint32_t last_save = 0;
     if (millis() - last_save >= 900000) { 
@@ -719,7 +1148,7 @@ void handleAutoSave() {
     }
 }
 
-// 3.b. Сохранение конфигурации, если она была изменена через Zigbee
+// Persists user-editable Zigbee attributes immediately after a write.
 void handleConfigSave() {
     if (zigbeeCold.isConfigDirty() || zigbeeHot.isConfigDirty()) {
         saveConfiguration();
@@ -728,7 +1157,6 @@ void handleConfigSave() {
     }
 }
 
-// 4. Status LED
 void updateStatusIndication() {
     static uint32_t last_blink = 0;
     if (!Zigbee.connected()) {
@@ -738,12 +1166,10 @@ void updateStatusIndication() {
             t ? StatusLedSet(20, 20, 0) : StatusLedSet(0, 0, 0);
         }
     } else {
-        StatusLedSet(0, 0, 0); // Heartbeat LED
-        // StatusLedSet(0, 1, 0); // Heartbeat LED
+        StatusLedSet(0, 0, 0);
     }
 }
 
-// 5. Service Button
 void checkServiceButton() {
     static uint32_t press_start = 0;
     if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
@@ -758,3 +1184,5 @@ void checkServiceButton() {
         press_start = 0;
     }
 }
+
+#endif  // RS485_UART_BRIDGE

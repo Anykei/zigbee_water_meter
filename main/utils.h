@@ -21,9 +21,7 @@
 
 namespace Utils {
 
-// Universal LED helpers — drive both RGB and GPIO LEDs simultaneously
-// when both are configured. Each is independently enabled via pin >= 0.
-
+// LED helpers drive both RGB and GPIO LEDs when those pins are configured.
 constexpr bool hasRgbLed  = (RGB_LED_PIN >= 0);
 constexpr bool hasGpioLed = (GPIO_STATUS_LED_PIN >= 0);
 
@@ -63,6 +61,6 @@ inline void showSystemStatus(bool connected) {
     }
 }
 
-} 
+}  // namespace Utils
 
-#endif
+#endif  // UTILS_H

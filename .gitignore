@@ -1,4 +1,6 @@
 .DS_Store
 .pio
-include
 .vscode
+include/*
+!include/
+!include/version.h
