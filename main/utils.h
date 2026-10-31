@@ -2,6 +2,7 @@
 #define UTILS_H
 
 #include <Arduino.h>
+#include <esp32-hal-rmt.h>
 
 #ifndef RGB_LED_PIN
 #define RGB_LED_PIN -1
@@ -38,6 +39,11 @@ inline void initGpioLed() {
 inline void setLed(uint8_t r, uint8_t g, uint8_t b) {
     if constexpr (hasRgbLed) {
         rgbLedWrite(RGB_LED_PIN, r, g, b);
+        // rgbLedWrite waits for TX but leaves the RMT channel enabled. Release
+        // its PM lock so the Nano can sleep, then hold the data line low.
+        rmtDeinit(RGB_LED_PIN);
+        pinMode(RGB_LED_PIN, OUTPUT);
+        digitalWrite(RGB_LED_PIN, LOW);
     }
     if constexpr (hasGpioLed) {
         initGpioLed();

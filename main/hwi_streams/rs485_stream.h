@@ -10,6 +10,9 @@ private:
     int _de_pin;
 
 public:
+    // Preserve the response window already verified with the physical meters.
+    static constexpr unsigned long kResponseTimeoutMs = 1000;
+
     RS485Stream(HardwareSerial* serial, int de_pin) : _serial(serial), _de_pin(de_pin) {}
 
     void begin(unsigned long baud, uint32_t config, int rx, int tx) {
@@ -46,7 +49,10 @@ public:
     int peek() override { return _serial->peek(); }
     void flush() override { _serial->flush(); }
 
-    void setTimeout(unsigned long timeout) { _serial->setTimeout(timeout); }
+    void setTimeout(unsigned long timeout) {
+        Stream::setTimeout(timeout);
+        _serial->setTimeout(timeout);
+    }
 };
 
 #endif  // RS485_STREAM_H

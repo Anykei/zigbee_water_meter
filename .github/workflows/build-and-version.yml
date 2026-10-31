@@ -52,6 +52,9 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Run host firmware regression tests
+        run: python3 tests/host/run.py
+
       - name: Check converter syntax
         run: |
           node --check water_meter_converter_en.js

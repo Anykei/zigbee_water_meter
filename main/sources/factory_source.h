@@ -15,7 +15,7 @@ namespace Source {
     };
     
     // Builds a source for the compile-time channel configuration selected in
-    // main.cpp. Ownership is transferred to the caller.
+    // app/config.h. Ownership is transferred to the caller.
     class SourceFactory {
     public:
         static WaterSource* create(SourceType type, uint64_t initialLiters, uint8_t pin, Driver::SmartMeterDriver* drv) {

@@ -7,6 +7,7 @@
 #include <functional>
 #include <atomic>
 #include "sources/water_source.h"
+#include "zigbee_sleep.h"
 
 typedef std::function<void()> SettingsChangedCallback;
 
@@ -28,6 +29,7 @@ public:
     ZigbeeWaterMeter(uint8_t endpoint, bool with_battery = false) : 
         ZigbeeEP(endpoint), _with_battery(with_battery) {
         _device_id = ESP_ZB_HA_METER_INTERFACE_DEVICE_ID;
+        _power_source = ZB_POWER_SOURCE_BATTERY;
     }
 
     bool isConfigDirty() const { return _config_dirty; }
@@ -219,8 +221,14 @@ public:
         _needs_config_report = false;
     }
 
+    void zbAttributeSet(const esp_zb_zcl_set_attr_value_message_t *message) override {
+        handleAttributeWrite(message);
+        ZigbeeSleep::wake();
+    }
+
     void handleAttributeWrite(const esp_zb_zcl_set_attr_value_message_t *message) {
-        if (!_source) return;
+        if (!_source || !message || message->info.status != ESP_ZB_ZCL_STATUS_SUCCESS ||
+            message->info.dst_endpoint != _endpoint) return;
         if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_METERING) {
             uint16_t id = message->attribute.id;
             if (id == kAttrRefreshRequest) {
@@ -243,7 +251,7 @@ public:
             }
 
             auto unpackU32 = [](const esp_zb_zcl_attribute_t* attr, uint32_t& out_val) -> bool {
-                if (attr->data.type != ESP_ZB_ZCL_ATTR_TYPE_U48) return false;
+                if (attr->data.type != ESP_ZB_ZCL_ATTR_TYPE_U48 || !attr->data.value || attr->data.size != 6) return false;
                 
                 uint64_t temp_val = 0;
                 memcpy(&temp_val, attr->data.value, attr->data.size > 6 ? 6 : attr->data.size);

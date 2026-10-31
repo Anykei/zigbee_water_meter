@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Release the Nano RGB LED's RMT power lock after transmission to allow light sleep.
+- Preserve the hardware-verified 1000 ms RS485 response timeout, with a delayed-response regression check.
+- Preserve Arduino Zigbee callback dispatch by handling writes through endpoint overrides.
+- Keep hourly reports ahead of heartbeat/on-change reports and handle timer rollover.
+- Anchor smart-meter hour/day accounting to the first successful reading after boot.
+- Apply RS485 timeouts to the wrapper and read complete frames without waiting for unused buffer space.
+- Express Zigbee scheduler sleep thresholds in milliseconds and clarify that automatic deep sleep is not implemented.
+
+### Added
+- Automatic Zigbee light sleep using rebuilt ESP-IDF power management, a 20 ms idle threshold and 3-second parent polling.
+- A system-signal wrapper preserving Arduino commissioning/rejoin/leave handling, plus awake locks for interview and peripheral work.
+- GPIO/task wakeups for the service button and wakeups on coordinator writes; pulse builds retain awake interrupt counting.
+- Light-sleep wakeup/duration diagnostics and host tests for sleep gating and signal forwarding.
+- Pinned pioarduino 55.03.36 build with regenerated SDK settings and matching linker sections for power management.
+- Host regression checks for accounting, reporting, and RS485, run in CI.
+
+### Changed
+- Split application configuration, metering, NVS storage, Zigbee reporting, board service and RS485 bridge code out of `main.cpp` while preserving startup and loop order.
+
 ## [0.1.0] - 2026-06-12
 
 ### Added

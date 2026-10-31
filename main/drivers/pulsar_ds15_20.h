@@ -68,6 +68,19 @@ private:
     uint32_t _currentValuesReadAt = 0;
     bool _currentValuesValid = false;
 
+    // The sixth byte is the complete frame length (including header and CRC).
+    // Read exactly that many bytes, rather than waiting for a 64-byte buffer.
+    size_t readFrame(uint8_t *buffer, size_t capacity) {
+        constexpr size_t headerSize = 6;
+        if (capacity < headerSize) return 0;
+        if (_transport->readBytes(buffer, headerSize) != headerSize) return 0;
+        const size_t length = buffer[5];
+        if (length < 10 || length > capacity) return 0;
+        const size_t remaining = length - headerSize;
+        if (_transport->readBytes(buffer + headerSize, remaining) != remaining) return 0;
+        return length;
+    }
+
     bool readTotalValue(float &result) {
         if (!readCurrentValues()) return false;
 
@@ -109,11 +122,11 @@ private:
         _transport->flush();
 
         uint8_t res[64];
-        size_t rxLen = _transport->readBytes(res, 64);
+        size_t rxLen = readFrame(res, sizeof(res));
         
         if (log_serial && rxLen > 0) {
             log_serial->printf("<<< RX [%08lu]: ", (unsigned long)_address);
-            for(int i=0; i<rxLen; i++) log_serial->printf("%02X ", res[i]);
+            for(size_t i=0; i<rxLen; i++) log_serial->printf("%02X ", res[i]);
             log_serial->println();
         }
 
@@ -156,7 +169,7 @@ private:
         for (size_t i = 0; i < 5; ++i) {
             memcpy(&_currentValues[i], &res[6 + (i * sizeof(float))], sizeof(float));
         }
-        _currentValuesReadAt = now;
+        _currentValuesReadAt = millis();
         _currentValuesValid = true;
 
         if (log_serial) {
@@ -194,10 +207,10 @@ private:
         while(_transport->available()) _transport->read();
         _transport->write(packet, len); _transport->flush();
 
-        rxLen = _transport->readBytes(res, resSize);
+        rxLen = readFrame(res, resSize);
         if (log_serial && rxLen > 0) {
             log_serial->printf("<<< RX [%08lu] Param 0x%04X: ", (unsigned long)_address, paramId);
-            for(int i=0; i<rxLen; i++) log_serial->printf("%02X ", res[i]);
+            for(size_t i=0; i<rxLen; i++) log_serial->printf("%02X ", res[i]);
             log_serial->println();
         }
 
@@ -216,7 +229,7 @@ private:
             memcmp(res, _addr, sizeof(_addr)) != 0 ||
             res[4] != 0x0A ||
             res[5] != rxLen ||
-            rxLen < 16 ||
+            rxLen < 18 ||
             res[14] != (requestId & 0xFF) ||
             res[15] != ((requestId >> 8) & 0xFF)
         ) {

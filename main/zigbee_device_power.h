@@ -45,7 +45,8 @@ public:
         _curve_high_mv(curve_high_mv),
         _curve_full_mv(curve_full_mv),
         _percent_smoothing_samples(normalizeSmoothingSamples(percent_smoothing_samples)) {
-        _device_id = ESP_ZB_HA_METER_INTERFACE_DEVICE_ID; 
+        _device_id = ESP_ZB_HA_METER_INTERFACE_DEVICE_ID;
+        _power_source = ZB_POWER_SOURCE_BATTERY;
     }
 
     void begin() {

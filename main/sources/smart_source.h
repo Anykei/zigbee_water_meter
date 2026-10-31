@@ -18,7 +18,10 @@ namespace Source {
             : _drv(drv), _liters(initialLiters) {}
 
         void begin() override {
-            _lastPoll = millis() - _pollInterval; 
+            // NVS is a fallback total, not the baseline for this boot's hour/day.
+            _reanchorAfterNextRead = true;
+            invalidateReadings();
+            _lastPoll = millis() - _pollInterval;
         }
 
         void setSerialNumber(uint32_t sn) override {
